@@ -47,30 +47,21 @@ Subsequent runs go straight to `docker compose up -d`.
 
 ### 2. Install the daemon (each machine that syncs)
 
-#### Fedora
-
 ```bash
-sudo dnf install rb_libtorrent-python3
-pip install -e daemon/
+curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 ```
 
-#### Other Linux / macOS
-
-```bash
-pip install libtorrent   # or system package equivalent
-pip install -e daemon/
-```
-
-Proto stubs are generated automatically during `pip install`.
+Handles libtorrent, clones the repo, and installs the daemon. Works on
+Fedora, Ubuntu/Debian, and macOS.
 
 ### 3. Start the daemon
 
 ```bash
-cd daemon && ./start.sh
+~/.local/share/peerdup/daemon/start.sh
 ```
 
-`start.sh` prompts for your machine name, registry address, and optional
-settings on first run, writes `config.toml`, then starts the daemon.
+Prompts for your machine name, registry address, and optional settings on
+first run, writes `config.toml`, then starts the daemon.
 
 ### 4. Share a folder
 

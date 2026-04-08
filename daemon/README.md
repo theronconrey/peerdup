@@ -41,32 +41,22 @@ relay bridge simultaneously - libtorrent uses whichever connects first.
 
 ## Installation
 
-### Fedora
-
 ```bash
-sudo dnf install rb_libtorrent-python3
-pip install -e .
+curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 ```
 
-### Other Linux / macOS
-
-```bash
-pip install libtorrent   # or install system package equivalent
-pip install -e .
-```
-
-Proto stubs are generated automatically during `pip install` - no manual
-code generation step required.
+Handles libtorrent, clones the repo to `~/.local/share/peerdup`, and installs
+the daemon. Works on Fedora, Ubuntu/Debian, and macOS.
 
 ## Setup
 
 ```bash
-./start.sh
+~/.local/share/peerdup/daemon/start.sh
 ```
 
-On first run `start.sh` prompts for your machine name, registry address, and
-optional relay/LAN settings, writes `config.toml`, then starts the daemon.
-Subsequent runs skip the prompts and go straight to `peerdup-daemon`.
+On first run prompts for your machine name, registry address, and optional
+relay/LAN settings, writes `config.toml`, then starts the daemon. Subsequent
+runs skip the prompts and go straight to `peerdup-daemon`.
 
 The socket path is auto-detected - no environment variable needed:
 - User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock` (e.g. `/run/user/1000/peerdup/control.sock`)
