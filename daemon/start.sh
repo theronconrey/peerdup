@@ -41,23 +41,6 @@ prompt_optional() {
     eval "$var=\$value"
 }
 
-prompt_yn() {
-    # prompt_yn <var_name> <prompt_text> <default y|n>
-    var="$1"
-    msg="$2"
-    default="$3"
-
-    while true; do
-        printf '%s [%s]: ' "$msg" "$default"
-        read -r value
-        value="${value:-$default}"
-        case "$value" in
-            y|Y|yes|YES) eval "$var=true";  break ;;
-            n|N|no|NO)   eval "$var=false"; break ;;
-            *) printf 'Please enter y or n.\n' ;;
-        esac
-    done
-}
 
 if [ ! -f "$CONFIG_FILE" ]; then
     printf '\npeerdup daemon setup\n'
@@ -68,16 +51,10 @@ if [ ! -f "$CONFIG_FILE" ]; then
     prompt_optional REGISTRY_ADDRESS "Registry address (host:port)" "set later in config.toml"
     LISTEN_PORT="55000"
 
-    printf '\n'
     if [ -n "$REGISTRY_ADDRESS" ]; then
-        prompt_yn TLS_ENABLED "Use TLS for registry connection" "y"
-        if [ "$TLS_ENABLED" = "true" ]; then
-            printf 'CA cert file path (leave blank to use system CAs): '
-            read -r CA_FILE
-        fi
-    else
         TLS_ENABLED="true"
-        printf '\nRegistry not set - TLS will default to enabled when you add it.\n'
+    else
+        TLS_ENABLED="false"
     fi
 
     printf '\n'
@@ -94,13 +71,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
     printf '\n'
     prompt LOG_LEVEL "Log level (DEBUG/INFO/WARNING/ERROR)" "INFO"
-
-    # Build ca_file line only if provided
-    CA_FILE_LINE=""
-    if [ -n "$CA_FILE" ]; then
-        CA_FILE_LINE="
-ca_file = \"$CA_FILE\""
-    fi
 
     # Build relay section
     if [ "$RELAY_ENABLED" = "true" ]; then
@@ -128,7 +98,7 @@ listen_port = $LISTEN_PORT
 
 [registry]
 $REGISTRY_LINE
-tls     = $TLS_ENABLED$CA_FILE_LINE
+tls     = $TLS_ENABLED
 
 [identity]
 name = "$PEER_NAME"
