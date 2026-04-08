@@ -44,10 +44,11 @@ If you prefer to run without Docker:
 
 ```bash
 pip install -e .
-cp config.example.toml config.toml
-# edit: set database_url, tls settings
-peerdup-registry --config config.toml
+./start.sh
 ```
+
+Prompts for port, database URL, and log level on first run, writes
+`config.toml`, then starts the registry. Subsequent runs skip the prompts.
 
 For TLS, either terminate it with a reverse proxy (Caddy, nginx) or generate
 a self-signed cert for development:
