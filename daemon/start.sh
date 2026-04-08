@@ -66,7 +66,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
     prompt PEER_NAME "Name for this machine (e.g. nas, laptop)"
     prompt_optional REGISTRY_ADDRESS "Registry address (host:port)" "set later in config.toml"
-    prompt LISTEN_PORT "libtorrent listen port" "55000"
+    LISTEN_PORT="55000"
 
     printf '\n'
     if [ -n "$REGISTRY_ADDRESS" ]; then
