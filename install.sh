@@ -50,7 +50,7 @@ else
             fi
             # Fall back to pip (builds from source - slow but portable)
             warn "No known system package for '$OS' - trying pip install libtorrent"
-            pip install --user libtorrent
+            "${PIP:-pip3}" install --user libtorrent
             ;;
     esac
 
@@ -71,7 +71,10 @@ fi
 
 # ── install daemon package ─────────────────────────────────────────────────────
 
-pip install --user -e "$INSTALL_DIR/daemon/"
+PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null) \
+    || die "pip not found - install python3-pip first"
+
+"$PIP" install --user -e "$INSTALL_DIR/daemon/"
 
 # ── peerdup-setup command ──────────────────────────────────────────────────────
 
