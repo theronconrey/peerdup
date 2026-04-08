@@ -143,19 +143,26 @@ class SyncCoordinator:
     # ── Runtime share management (called by ControlService) ──────────────────
 
     async def create_share(self, name: str, local_path: str,
-                           permission: str = "rw") -> dict:
+                           permission: str = "rw",
+                           import_key_hex: str = "") -> dict:
         """
-        Create a brand-new share:
-          1. Generate a fresh Ed25519 keypair — public key becomes share_id
+        Create a brand-new share (or re-import an existing one):
+          1. Generate a fresh Ed25519 keypair — or load seed from import_key_hex
           2. Call registry.CreateShare (signed with peer identity key)
           3. Persist share keypair locally
           4. Activate the share (watch, torrent, announce)
         Returns a status dict with share_id included.
         """
-        # 1. Generate share keypair.
-        share_sk  = SigningKey.generate()
-        share_id  = base58.b58encode(bytes(share_sk.verify_key)).decode()
-        share_seed = bytes(share_sk)
+        # 1. Generate or import share keypair.
+        if import_key_hex:
+            share_seed = bytes.fromhex(import_key_hex)
+            if len(share_seed) != 32:
+                raise ValueError("Imported key must be exactly 32 bytes")
+            share_sk = SigningKey(share_seed)
+        else:
+            share_sk   = SigningKey.generate()
+            share_seed = bytes(share_sk)
+        share_id = base58.b58encode(bytes(share_sk.verify_key)).decode()
 
         # 2. Sign CreateShare with peer identity key and call registry.
         sig = self._identity.sign_create_share(share_id, name)
@@ -446,20 +453,38 @@ class SyncCoordinator:
         peers_online = len(self._db.get_online_peers(share_id))
 
         return {
-            "share_id":     share_id,
-            "name":         local_share.name,
-            "local_path":   local_share.local_path,
-            "state":        local_share.state.value,
-            "permission":   local_share.permission,
-            "is_owner":     bool(local_share.is_owner),
-            "owner_id":     owner_id,
-            "created_at":   created_at,
-            "bytes_total":  lt_status.bytes_total if lt_status else 0,
-            "bytes_done":   lt_status.bytes_done  if lt_status else 0,
-            "info_hash":    lt_status.info_hash    if lt_status else "",
-            "peers_online": peers_online,
-            "total_peers":  total_peers,
-            "last_error":   local_share.last_error or "",
+            "share_id":       share_id,
+            "name":           local_share.name,
+            "local_path":     local_share.local_path,
+            "state":          local_share.state.value,
+            "permission":     local_share.permission,
+            "is_owner":       bool(local_share.is_owner),
+            "owner_id":       owner_id,
+            "created_at":     created_at,
+            "bytes_total":    lt_status.bytes_total if lt_status else 0,
+            "bytes_done":     lt_status.bytes_done  if lt_status else 0,
+            "info_hash":      lt_status.info_hash    if lt_status else "",
+            "peers_online":   peers_online,
+            "total_peers":    total_peers,
+            "last_error":     local_share.last_error or "",
+            "upload_limit":   local_share.upload_limit   or 0,
+            "download_limit": local_share.download_limit or 0,
+        }
+
+    def set_share_rate_limit(self, share_id: str,
+                             upload_limit: int, download_limit: int) -> dict:
+        """Set per-share rate limits and persist them."""
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found")
+        self._db.set_share_rate_limits(share_id, upload_limit, download_limit)
+        self._lt.set_rate_limit(share_id, upload_limit, download_limit)
+        log.info("Rate limit set share=%s up=%d down=%d",
+                 share_id, upload_limit, download_limit)
+        return {
+            "share_id":       share_id,
+            "upload_limit":   upload_limit,
+            "download_limit": download_limit,
         }
 
     def list_shares(self) -> list[dict]:
@@ -604,6 +629,13 @@ class SyncCoordinator:
             log.exception("Failed to add torrent for share %s", share_id)
             self._db.set_share_state(share_id, ShareState.ERROR, error=str(e))
             return
+
+        # Apply any stored per-share rate limits.
+        local_share = self._db.get_share(share_id)
+        if local_share and (local_share.upload_limit or local_share.download_limit):
+            self._lt.set_rate_limit(share_id,
+                                    local_share.upload_limit or 0,
+                                    local_share.download_limit or 0)
 
         for kp in self._db.get_online_peers(share_id):
             try:

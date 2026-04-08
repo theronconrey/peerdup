@@ -18,7 +18,7 @@ from enum import Enum as PyEnum
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Enum, ForeignKey,
-    Integer, String, UniqueConstraint, create_engine, Text,
+    Integer, String, UniqueConstraint, create_engine, Text, text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 
@@ -49,8 +49,10 @@ class LocalShare(Base):
     is_owner    = Column(Boolean, nullable=False, default=False)
     state       = Column(Enum(ShareState), nullable=False,
                          default=ShareState.SYNCING)
-    info_hash   = Column(String, nullable=True)   # current libtorrent info-hash
-    last_error  = Column(String, nullable=True)
+    info_hash      = Column(String, nullable=True)   # current libtorrent info-hash
+    last_error     = Column(String, nullable=True)
+    upload_limit   = Column(Integer, nullable=False, default=0)   # bytes/sec, 0 = unlimited
+    download_limit = Column(Integer, nullable=False, default=0)
     added_at    = Column(DateTime(timezone=True), default=utcnow)
     updated_at  = Column(DateTime(timezone=True), default=utcnow,
                          onupdate=utcnow)
@@ -126,7 +128,23 @@ def make_state_db(data_dir: str):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
+    _migrate(engine)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _migrate(engine):
+    """Add columns introduced after initial schema (idempotent)."""
+    migrations = [
+        ("local_shares", "upload_limit",   "INTEGER NOT NULL DEFAULT 0"),
+        ("local_shares", "download_limit", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    with engine.connect() as conn:
+        for table, col, typedef in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}"))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
 
 
 # ── Repository helpers ────────────────────────────────────────────────────────
@@ -176,6 +194,15 @@ class StateDB:
             share = s.query(LocalShare).filter_by(share_id=share_id).first()
             if share:
                 s.delete(share)
+                s.commit()
+
+    def set_share_rate_limits(self, share_id: str,
+                              upload_limit: int, download_limit: int):
+        with self._sf() as s:
+            share = s.query(LocalShare).filter_by(share_id=share_id).first()
+            if share:
+                share.upload_limit   = upload_limit
+                share.download_limit = download_limit
                 s.commit()
 
     def set_share_state(self, share_id: str, state: ShareState,

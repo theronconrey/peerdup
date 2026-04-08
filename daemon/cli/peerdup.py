@@ -12,6 +12,7 @@ Commands:
     share create <name> <path>            Create a new share (generates share_id)
     share add <share_id> <path>           Join an existing share
     share remove <share_id>               Remove a share (optionally --delete-files)
+    share set-limit <share_id>            Set per-share rate limits (--up / --down)
     share pause <share_id>                Pause syncing a share
     share resume <share_id>               Resume a paused share
     share grant <share_id> <peer_id>      Grant a peer access to your share
@@ -90,6 +91,9 @@ def cmd_share_info(args):
     print(f"  info_hash  : {r.info_hash or '(none)'}")
     print(f"  progress   : {_human(r.bytes_done)} / {_human(r.bytes_total)}")
     print(f"  peers      : {r.peers_online} online / {r.total_peers} total")
+    up_str   = f"{_human(r.upload_limit)}/s"   if r.upload_limit   else "unlimited"
+    down_str = f"{_human(r.download_limit)}/s" if r.download_limit else "unlimited"
+    print(f"  rate limit : ↑ {up_str}  ↓ {down_str}")
     if r.last_error:
         print(f"  error      : {r.last_error}")
     print("─" * 60)
@@ -141,14 +145,32 @@ def cmd_share_peers(args):
 def cmd_share_create(args):
     import control_pb2  # type: ignore
     stub = _stub(args.socket)
+
+    import_key_hex = ""
+    if getattr(args, "import_key", None):
+        try:
+            with open(args.import_key, "rb") as f:
+                seed = f.read()
+            if len(seed) != 32:
+                print(f"Error: key file must be exactly 32 bytes (got {len(seed)})",
+                      file=sys.stderr)
+                sys.exit(1)
+            import_key_hex = seed.hex()
+        except OSError as e:
+            print(f"Error reading key file: {e}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         resp = stub.CreateShare(control_pb2.CreateShareRequest(
-            name       = args.name,
-            local_path = args.path,
-            permission = args.permission,
+            name           = args.name,
+            local_path     = args.path,
+            permission     = args.permission,
+            import_key_hex = import_key_hex,
         ))
-        print(f"Share created successfully!")
-        print(f"share_id : {resp.share_id}")
+        action = "imported" if import_key_hex else "created"
+        print(f"Share {action} successfully!")
+        print(f"share_id    : {resp.share_id}")
+        print(f"fingerprint : {resp.share_id[:8]}  (first 8 chars — verify with peers)")
         print(f"")
         print(f"Give this share_id to peers, then have them run:")
         print(f"  peerdup share grant {resp.share_id} <their-peer-id>")
@@ -216,6 +238,26 @@ def cmd_share_remove(args):
             delete_files = args.delete_files,
         ))
         print(f"Removed share {args.share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_set_limit(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        up   = _parse_rate(args.up)   if args.up   else 0
+        down = _parse_rate(args.down) if args.down else 0
+        resp = stub.SetShareRateLimit(control_pb2.SetShareRateLimitRequest(
+            share_id       = args.share_id,
+            upload_limit   = up,
+            download_limit = down,
+        ))
+        up_str   = f"{_human(resp.upload_limit)}/s"   if resp.upload_limit   else "unlimited"
+        down_str = f"{_human(resp.download_limit)}/s" if resp.download_limit else "unlimited"
+        print(f"Rate limits set for {args.share_id[:16]}..")
+        print(f"  upload   : {up_str}")
+        print(f"  download : {down_str}")
     except grpc.RpcError as e:
         _err(e)
 
@@ -376,6 +418,16 @@ def _format_last_seen(iso: str) -> str:
         return iso[:16]
 
 
+def _parse_rate(s: str) -> int:
+    """Parse a human-readable rate like '10M', '512K', '1G' to bytes/sec."""
+    s = s.strip().upper()
+    units = {"B": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
+    for suffix, mult in sorted(units.items(), key=lambda x: -x[1]):
+        if s.endswith(suffix):
+            return int(float(s[:-1]) * mult)
+    return int(s)  # bare number = bytes/sec
+
+
 def _human(n: int) -> str:
     for unit in ("B", "K", "M", "G", "T"):
         if n < 1024:
@@ -421,6 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("--permission", default="rw",
                           choices=["rw", "ro", "encrypted"],
                           help="Your own permission level (default: rw)")
+    create_p.add_argument("--import-key", metavar="PATH",
+                          help="Import an existing 32-byte Ed25519 seed file "
+                               "instead of generating a new keypair")
 
     add_p = share_sub.add_parser("add", help="Join an existing share")
     add_p.add_argument("share_id",   help="Share ID (base58 pubkey from registry)")
@@ -442,6 +497,13 @@ def build_parser() -> argparse.ArgumentParser:
     revoke_p = share_sub.add_parser("revoke", help="Revoke a peer's access")
     revoke_p.add_argument("share_id")
     revoke_p.add_argument("peer_id")
+
+    limit_p = share_sub.add_parser("set-limit", help="Set per-share rate limits")
+    limit_p.add_argument("share_id")
+    limit_p.add_argument("--up",   metavar="RATE",
+                         help="Upload limit e.g. 10M, 512K, 0 = unlimited")
+    limit_p.add_argument("--down", metavar="RATE",
+                         help="Download limit e.g. 50M, 1G, 0 = unlimited")
 
     pause_p = share_sub.add_parser("pause", help="Pause a share")
     pause_p.add_argument("share_id")
@@ -469,16 +531,17 @@ def main():
         dispatch[args.command](args)
     elif args.command == "share":
         share_dispatch = {
-            "list":   cmd_share_list,
-            "info":   cmd_share_info,
-            "peers":  cmd_share_peers,
-            "create": cmd_share_create,
-            "add":    cmd_share_add,
-            "remove": cmd_share_remove,
-            "pause":  cmd_share_pause,
-            "resume": cmd_share_resume,
-            "grant":  cmd_share_grant,
-            "revoke": cmd_share_revoke,
+            "list":      cmd_share_list,
+            "info":      cmd_share_info,
+            "peers":     cmd_share_peers,
+            "create":    cmd_share_create,
+            "add":       cmd_share_add,
+            "remove":    cmd_share_remove,
+            "set-limit": cmd_share_set_limit,
+            "pause":     cmd_share_pause,
+            "resume":    cmd_share_resume,
+            "grant":     cmd_share_grant,
+            "revoke":    cmd_share_revoke,
         }
         share_dispatch[args.share_command](args)
     else:

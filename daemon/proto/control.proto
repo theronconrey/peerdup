@@ -70,9 +70,10 @@ message StatusEvent {
 // ── Create share ─────────────────────────────────────────────────────────────
 
 message CreateShareRequest {
-  string name        = 1;  // human-readable label
-  string local_path  = 2;  // absolute path to sync directory (created if absent)
-  string permission  = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
+  string name           = 1;  // human-readable label
+  string local_path     = 2;  // absolute path to sync directory (created if absent)
+  string permission     = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
+  string import_key_hex = 4;  // hex-encoded 32-byte Ed25519 seed to import; empty = generate new
 }
 
 message CreateShareResponse {
@@ -149,9 +150,25 @@ message GetShareInfoResponse {
   uint64 bytes_total  = 9;
   uint64 bytes_done   = 10;
   string info_hash    = 11;  // libtorrent info-hash (hex)
-  int32  peers_online = 12;  // peers currently announcing
-  int32  total_peers  = 13;  // total peers with ACL access
-  string last_error   = 14;
+  int32  peers_online   = 12;  // peers currently announcing
+  int32  total_peers    = 13;  // total peers with ACL access
+  string last_error     = 14;
+  int64  upload_limit   = 15;  // bytes/sec, 0 = unlimited
+  int64  download_limit = 16;  // bytes/sec, 0 = unlimited
+}
+
+// ── Rate limits ───────────────────────────────────────────────────────────────
+
+message SetShareRateLimitRequest {
+  string share_id       = 1;
+  int64  upload_limit   = 2;  // bytes/sec, 0 = unlimited
+  int64  download_limit = 3;  // bytes/sec, 0 = unlimited
+}
+
+message SetShareRateLimitResponse {
+  string share_id       = 1;
+  int64  upload_limit   = 2;
+  int64  download_limit = 3;
 }
 
 // ── Pause / resume ────────────────────────────────────────────────────────────
@@ -174,7 +191,10 @@ service ControlService {
   rpc ResumeShare   (ResumeShareRequest)  returns (ResumeShareResponse);
 
   // Share info
-  rpc GetShareInfo  (GetShareInfoRequest)   returns (GetShareInfoResponse);
+  rpc GetShareInfo      (GetShareInfoRequest)       returns (GetShareInfoResponse);
+
+  // Rate limits
+  rpc SetShareRateLimit (SetShareRateLimitRequest)  returns (SetShareRateLimitResponse);
 
   // Peer roster
   rpc ListSharePeers (ListSharePeersRequest) returns (ListSharePeersResponse);

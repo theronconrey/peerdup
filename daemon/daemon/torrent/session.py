@@ -197,6 +197,17 @@ class LibtorrentSession:
                 handle.connect_peer((host, port))
                 log.debug("Injected peer share=%s peer=%s:%s", share_id, host, port)
 
+    def set_rate_limit(self, share_id: str,
+                       upload_limit: int, download_limit: int):
+        """Set per-torrent upload/download rate limits (bytes/sec, 0 = unlimited)."""
+        with self._lock:
+            handle = self._handles.get(share_id)
+            if handle and handle.is_valid():
+                handle.set_upload_limit(upload_limit)
+                handle.set_download_limit(download_limit)
+                log.debug("Rate limit share=%s up=%d down=%d",
+                          share_id, upload_limit, download_limit)
+
     def get_status(self, share_id: str) -> TorrentStatus | None:
         """Return current status for a share's torrent."""
         with self._lock:

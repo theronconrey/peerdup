@@ -37,6 +37,7 @@ class ControlServicer:
                     request.name,
                     request.local_path,
                     request.permission or "rw",
+                    import_key_hex=request.import_key_hex or "",
                 )
             )
             loop.close()
@@ -107,6 +108,27 @@ class ControlServicer:
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
 
+    # ── Rate limits ───────────────────────────────────────────────────────────
+
+    def SetShareRateLimit(self, request, context):
+        pb = self._pb
+        try:
+            result = self._coord.set_share_rate_limit(
+                request.share_id,
+                request.upload_limit,
+                request.download_limit,
+            )
+            return pb.SetShareRateLimitResponse(
+                share_id       = result["share_id"],
+                upload_limit   = result["upload_limit"],
+                download_limit = result["download_limit"],
+            )
+        except KeyError as e:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(e))
+        except Exception as e:
+            log.exception("SetShareRateLimit failed")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     # ── Share info ────────────────────────────────────────────────────────────
 
     def GetShareInfo(self, request, context):
@@ -125,9 +147,11 @@ class ControlServicer:
                 bytes_total  = d["bytes_total"],
                 bytes_done   = d["bytes_done"],
                 info_hash    = d["info_hash"],
-                peers_online = d["peers_online"],
-                total_peers  = d["total_peers"],
-                last_error   = d["last_error"],
+                peers_online   = d["peers_online"],
+                total_peers    = d["total_peers"],
+                last_error     = d["last_error"],
+                upload_limit   = d["upload_limit"],
+                download_limit = d["download_limit"],
             )
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
