@@ -58,11 +58,11 @@ cp config.example.toml config.toml
 peerdup-daemon --config config.toml
 ```
 
-Set `PEERDUP_SOCKET` to avoid passing `--socket` on every CLI command:
+The socket path is auto-detected — no environment variable needed:
+- User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock` (e.g. `/run/user/1000/peerdup/control.sock`)
+- Root/system installs: `/run/peerdup/control.sock`
 
-```bash
-export PEERDUP_SOCKET=/run/peerdup/control.sock
-```
+Override with `PEERDUP_SOCKET` if you need a non-standard path.
 
 ## CLI reference
 
@@ -168,12 +168,12 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
 | `[daemon]` | `name` | — | Human-readable peer name |
-| `[daemon]` | `data_dir` | `/var/lib/peerdup` | State DB + torrent cache |
-| `[daemon]` | `socket_path` | `/run/peerdup/control.sock` | CLI control socket |
+| `[daemon]` | `data_dir` | `~/.local/share/peerdup` (user) / `/var/lib/peerdup` (root) | State DB + torrent cache |
+| `[daemon]` | `socket_path` | `$XDG_RUNTIME_DIR/peerdup/control.sock` (user) / `/run/peerdup/control.sock` (root) | CLI control socket |
 | `[daemon]` | `listen_port` | `55000` | libtorrent listen port |
 | `[registry]` | `address` | — | `host:port` of registry |
 | `[registry]` | `tls` | `true` | Enable TLS to registry |
-| `[identity]` | `key_file` | `/var/lib/peerdup/identity.key` | Ed25519 private key |
+| `[identity]` | `key_file` | `~/.local/share/peerdup/identity.key` (user) / `/var/lib/peerdup/identity.key` (root) | Ed25519 private key |
 | `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec) |
 | `[libtorrent]` | `download_rate_limit` | `0` | Global download cap (bytes/sec) |
 | `[lan]` | `enabled` | `true` | LAN multicast discovery |

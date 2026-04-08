@@ -301,7 +301,11 @@ class LibtorrentSession:
 
     def _save_torrent(self, info, path: str):
         import libtorrent as lt  # type: ignore
-        data = lt.bencode(info.metadata())
+        # info.metadata() / info_section() return the raw bencoded info-dict
+        # bytes — not a complete torrent file. Wrap it in {"info": ...} to
+        # produce a valid .torrent file that lt.torrent_info() can load.
+        raw = info.info_section() if hasattr(info, "info_section") else info.metadata()
+        data = lt.bencode({"info": lt.bdecode(raw)})
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)

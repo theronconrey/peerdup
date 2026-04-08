@@ -40,7 +40,6 @@ cp registry/config.example.toml registry/config.toml
 cp daemon/config.example.toml daemon/config.toml
 # edit: set registry.address, identity.name
 
-export PEERDUP_SOCKET=/path/to/control.sock  # if not using the default
 ```
 
 ### 4. Run
@@ -98,4 +97,5 @@ peerdup watch
 ```
 
 Share commands accept either a share name (`photos`) or a full share_id.
-Set `PEERDUP_SOCKET` to avoid passing `--socket` on every command.
+The socket path is auto-detected from `$XDG_RUNTIME_DIR` (user installs) or
+`/run/peerdup/control.sock` (root/system installs). Override with `PEERDUP_SOCKET`.
