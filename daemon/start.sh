@@ -161,6 +161,9 @@ else
     printf 'Using existing config.toml\n\n'
 fi
 
+# Kill any existing daemon before starting a fresh one.
+pkill -f "peerdup-daemon --config" 2>/dev/null && sleep 1 || true
+
 LOG_FILE="${TMPDIR:-/tmp}/peerdup-daemon.log"
 peerdup-daemon --config "$CONFIG_FILE" "$@" >"$LOG_FILE" 2>&1 &
 DAEMON_PID=$!
