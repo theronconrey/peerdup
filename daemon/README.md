@@ -117,7 +117,10 @@ peerdup status
 peerdup watch                              # live event stream (includes CONFLICT events)
 ```
 
-`peerdup share list` shows a `MODE` column (`registry` or `local`) for each share.
+`peerdup share list` shows a `MODE` column (`registry` or `local`) and a `PEERS`
+column formatted as `active/announced` - active libtorrent connections slash
+registry-announced peers. Live transfer rates are printed below the row when
+non-zero.
 
 ### Registry flow
 
