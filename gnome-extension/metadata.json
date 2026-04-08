@@ -1,0 +1,8 @@
+{
+  "uuid": "peerdup@peerdup",
+  "name": "peerdup",
+  "description": "peerdup sync status in your top bar — track transfer progress and pause/resume shares",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/theronconrey/peerdup"
+}

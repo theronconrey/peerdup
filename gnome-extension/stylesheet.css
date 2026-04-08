@@ -1,0 +1,26 @@
+/*
+ * peerdup GNOME Shell extension styles
+ */
+
+.peerdup-share-name {
+    font-weight: bold;
+    font-size: 0.95em;
+}
+
+.peerdup-peers-label {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.85em;
+    margin-left: 8px;
+}
+
+.peerdup-peers-warn {
+    color: #e5a50a;
+    font-size: 0.85em;
+    margin-left: 8px;
+}
+
+.peerdup-status-label {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.82em;
+    font-family: monospace;
+}

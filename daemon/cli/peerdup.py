@@ -27,6 +27,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 import grpc
@@ -119,6 +120,10 @@ def cmd_share_list(args):
     stub = _stub(args.socket)
     try:
         resp = stub.ListShares(control_pb2.ListSharesRequest())
+        if getattr(args, 'json', False):
+            print(json.dumps({'shares': [_share_to_dict(s) for s in resp.shares]}),
+                  flush=True)
+            return
         if not resp.shares:
             print("No active shares.")
             return
@@ -440,14 +445,57 @@ def cmd_status(args):
 def cmd_watch(args):
     from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
-    print("Watching for status events (Ctrl-C to stop)...")
+    use_json = getattr(args, 'json', False)
+    if not use_json:
+        print("Watching for status events (Ctrl-C to stop)...")
     try:
         for event in stub.WatchStatus(control_pb2.StatusRequest()):
-            _print_event(event)
+            if use_json:
+                _print_event_json(event)
+            else:
+                _print_event(event)
     except KeyboardInterrupt:
         pass
     except grpc.RpcError as e:
         _err(e)
+
+
+# ── JSON helpers (machine-readable output) ────────────────────────────────────
+
+def _share_to_dict(s) -> dict:
+    return {
+        'share_id':      s.share_id,
+        'name':          s.name,
+        'local_path':    s.local_path,
+        'state':         s.state,
+        'mode':          s.mode or 'registry',
+        'bytes_done':    s.bytes_done,
+        'bytes_total':   s.bytes_total,
+        'lt_peers':      s.lt_peers,
+        'peers_online':  s.peers_online,
+        'upload_rate':   s.upload_rate,
+        'download_rate': s.download_rate,
+        'last_error':    s.last_error,
+        'conflict_strategy': s.conflict_strategy,
+    }
+
+
+def _print_event_json(event):
+    from daemon import control_pb2  # type: ignore
+    type_map = {
+        control_pb2.StatusEvent.EVENT_TYPE_SHARE_UPDATED: 'share_updated',
+        control_pb2.StatusEvent.EVENT_TYPE_PEER_EVENT:    'peer_event',
+        control_pb2.StatusEvent.EVENT_TYPE_SYNC_PROGRESS: 'sync_progress',
+        control_pb2.StatusEvent.EVENT_TYPE_ERROR:         'error',
+        control_pb2.StatusEvent.EVENT_TYPE_CONFLICT:      'conflict',
+    }
+    obj = {
+        'type':    type_map.get(event.type, 'unknown'),
+        'message': event.message,
+    }
+    if event.conflict_id:
+        obj['conflict_id'] = event.conflict_id
+    print(json.dumps(obj), flush=True)
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
@@ -611,7 +659,9 @@ def build_parser() -> argparse.ArgumentParser:
     share_p = sub.add_parser("share", help="Manage shares")
     share_sub = share_p.add_subparsers(dest="share_command", required=True)
 
-    share_sub.add_parser("list", help="List active shares")
+    list_p = share_sub.add_parser("list", help="List active shares")
+    list_p.add_argument("--json", action="store_true", default=False,
+                        help="Output machine-readable JSON")
 
     info_p = share_sub.add_parser("info", help="Show metadata for a single share")
     info_p.add_argument("share_id")
@@ -691,7 +741,9 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_p.add_argument("resolution", choices=["keep-local", "keep-remote"])
 
     sub.add_parser("status", help="Show current daemon status")
-    sub.add_parser("watch",  help="Stream live status events")
+    watch_p = sub.add_parser("watch", help="Stream live status events")
+    watch_p.add_argument("--json", action="store_true", default=False,
+                         help="Output machine-readable newline-delimited JSON")
 
     return p
 

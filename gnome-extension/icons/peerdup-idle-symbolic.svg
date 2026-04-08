@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Upper arc: right half of circle -->
+  <path d="M 8 2.5 A 5.5 5.5 0 0 1 13.5 8"
+        fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+  <!-- Arrowhead at end of upper arc (pointing down-right) -->
+  <path d="M 11.2 6.6 L 13.5 8 L 12.4 10.2"
+        fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Lower arc: left half of circle -->
+  <path d="M 8 13.5 A 5.5 5.5 0 0 1 2.5 8"
+        fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+  <!-- Arrowhead at end of lower arc (pointing up-left) -->
+  <path d="M 4.8 9.4 L 2.5 8 L 3.6 5.8"
+        fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
