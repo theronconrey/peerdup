@@ -90,7 +90,7 @@ peerdup watch                               # live status stream
 
 ```bash
 # Fedora provides libtorrent-rasterbar Python bindings via dnf:
-sudo dnf install python3-libtorrent
+sudo dnf install rb_libtorrent-python3
 
 # Or install from PyPI (may need build tools):
 pip install libtorrent

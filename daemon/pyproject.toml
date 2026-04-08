@@ -26,7 +26,7 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     # libtorrent Python bindings
     # Install via: pip install libtorrent
-    # Or on Fedora: dnf install python3-libtorrent
+    # Or on Fedora: dnf install rb_libtorrent-python3
     "libtorrent>=2.0; sys_platform != 'unsupported'",
     # systemd journal logging (optional, Linux only)
     # "systemd-python>=235",
