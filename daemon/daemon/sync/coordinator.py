@@ -76,10 +76,15 @@ class SyncCoordinator:
         self._file_watcher: FileWatcher | None = None
         self._lan = None   # LanDiscovery, set in start() if enabled
 
+        # Set in start(); used by ControlServicer to schedule tasks on the
+        # correct event loop via asyncio.run_coroutine_threadsafe.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
     # ── Startup ───────────────────────────────────────────────────────────────
 
     async def start(self, loop: asyncio.AbstractEventLoop, lan_config=None):
         """Boot the coordinator. Call once after registry.connect()."""
+        self._loop = loop
 
         # Bridge watchdog thread → asyncio queue.
         bridge = FileWatcher.make_async_bridge(loop, self._fs_event_queue)
@@ -838,10 +843,13 @@ class SyncCoordinator:
             self._data_dir, "torrents", f"{share_id}.torrent"
         )
 
+        local_share = self._db.get_share(share_id)
+        local_only  = local_share.local_only if local_share else False
+
         # If we have no files and no saved torrent, try to bootstrap from an
         # online peer's announced info_hash (magnet-style / BEP 9 ut_metadata).
         peer_info_hash: str | None = None
-        if not has_files and not os.path.exists(torrent_path):
+        if not has_files and not os.path.exists(torrent_path) and not local_only:
             try:
                 peers = self._registry.get_share_peers(share_id, online_only=True)
                 for sp in peers:
@@ -868,7 +876,6 @@ class SyncCoordinator:
             return
 
         # Apply any stored per-share rate limits.
-        local_share = self._db.get_share(share_id)
         if local_share and (local_share.upload_limit or local_share.download_limit):
             self._lt.set_rate_limit(share_id,
                                     local_share.upload_limit or 0,
@@ -881,28 +888,29 @@ class SyncCoordinator:
             except Exception:
                 pass
 
-        # Announce immediately so peers discover our info_hash without waiting
-        # for the background loop's first iteration.
-        try:
-            await self._announce(share_id)
-        except Exception:
-            log.warning("Initial announce failed for share=%s (will retry in loop)",
-                        share_id)
+        if not local_only:
+            # Announce immediately so peers discover our info_hash without
+            # waiting for the background loop's first iteration.
+            try:
+                await self._announce(share_id)
+            except Exception:
+                log.warning("Initial announce failed for share=%s (will retry in loop)",
+                            share_id)
 
-        if share_id not in self._announce_tasks:
-            self._announce_tasks[share_id] = asyncio.create_task(
-                self._announce_loop(share_id)
-            )
-
-        if share_id not in self._watch_tasks:
-            stop_ev = asyncio.Event()
-            self._watch_stop[share_id] = stop_ev
-            handler = self._make_peer_event_handler(share_id)
-            self._watch_tasks[share_id] = asyncio.create_task(
-                watch_share_peers_loop(
-                    self._registry, share_id, handler, stop_ev,
+            if share_id not in self._announce_tasks:
+                self._announce_tasks[share_id] = asyncio.create_task(
+                    self._announce_loop(share_id)
                 )
-            )
+
+            if share_id not in self._watch_tasks:
+                stop_ev = asyncio.Event()
+                self._watch_stop[share_id] = stop_ev
+                handler = self._make_peer_event_handler(share_id)
+                self._watch_tasks[share_id] = asyncio.create_task(
+                    watch_share_peers_loop(
+                        self._registry, share_id, handler, stop_ev,
+                    )
+                )
 
     # ── Registry connect loop ─────────────────────────────────────────────────
 

@@ -26,13 +26,24 @@ class ControlServicer:
         self._pb     = control_pb2
         self._pb_grpc = control_pb2_grpc
 
+    def _run_async(self, coro):
+        """
+        Run an async coordinator method on the coordinator's main event loop,
+        blocking until the result is available.
+
+        This ensures that asyncio.create_task() calls inside the coroutine
+        schedule tasks on the correct long-lived event loop rather than on a
+        throwaway loop that is immediately closed.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._coord._loop)
+        return future.result()
+
     # ── Share management ──────────────────────────────────────────────────────
 
     def CreateShare(self, request, context):
         pb = self._pb
         try:
-            loop   = asyncio.new_event_loop()
-            result = loop.run_until_complete(
+            result = self._run_async(
                 self._coord.create_share(
                     request.name,
                     request.local_path,
@@ -42,7 +53,6 @@ class ControlServicer:
                     local_only=request.local_only,
                 )
             )
-            loop.close()
             return pb.CreateShareResponse(
                 share    = self._dict_to_proto(result),
                 share_id = result["share_id"],
@@ -54,8 +64,7 @@ class ControlServicer:
     def AddShare(self, request, context):
         pb = self._pb
         try:
-            loop   = asyncio.new_event_loop()
-            status = loop.run_until_complete(
+            status = self._run_async(
                 self._coord.add_share(
                     request.share_id,
                     request.local_path,
@@ -64,7 +73,6 @@ class ControlServicer:
                     local_only=request.local_only,
                 )
             )
-            loop.close()
             return pb.AddShareResponse(share=self._dict_to_proto(status))
         except Exception as e:
             log.exception("AddShare failed")
@@ -73,11 +81,9 @@ class ControlServicer:
     def RemoveShare(self, request, context):
         pb = self._pb
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(
+            self._run_async(
                 self._coord.remove_share(request.share_id, request.delete_files)
             )
-            loop.close()
             return pb.RemoveShareResponse()
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
@@ -95,9 +101,7 @@ class ControlServicer:
     def PauseShare(self, request, context):
         pb = self._pb
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self._coord.pause_share(request.share_id))
-            loop.close()
+            self._run_async(self._coord.pause_share(request.share_id))
             return pb.PauseShareResponse()
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
@@ -105,9 +109,7 @@ class ControlServicer:
     def ResumeShare(self, request, context):
         pb = self._pb
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self._coord.resume_share(request.share_id))
-            loop.close()
+            self._run_async(self._coord.resume_share(request.share_id))
             return pb.ResumeShareResponse()
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
@@ -180,14 +182,12 @@ class ControlServicer:
     def ResolveConflict(self, request, context):
         pb = self._pb
         try:
-            loop   = asyncio.new_event_loop()
-            result = loop.run_until_complete(
+            result = self._run_async(
                 self._coord.resolve_conflict(
                     request.conflict_id,
                     request.resolution,
                 )
             )
-            loop.close()
             return pb.ResolveConflictResponse(
                 conflict_id = result["conflict_id"],
                 resolution  = result["resolution"],
@@ -272,15 +272,13 @@ class ControlServicer:
     def GrantAccess(self, request, context):
         pb = self._pb
         try:
-            loop   = asyncio.new_event_loop()
-            result = loop.run_until_complete(
+            result = self._run_async(
                 self._coord.grant_access(
                     request.share_id,
                     request.peer_id,
                     request.permission or "rw",
                 )
             )
-            loop.close()
             return pb.GrantAccessResponse(
                 share_id   = result["share_id"],
                 peer_id    = result["peer_id"],
@@ -297,11 +295,9 @@ class ControlServicer:
     def RevokeAccess(self, request, context):
         pb = self._pb
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(
+            self._run_async(
                 self._coord.revoke_access(request.share_id, request.peer_id)
             )
-            loop.close()
             return pb.RevokeAccessResponse()
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
