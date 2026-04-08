@@ -152,10 +152,7 @@ EOF
     printf '\nConfiguration saved to config.toml\n'
 
     if [ -z "$REGISTRY_ADDRESS" ]; then
-        printf '\nRegistry not configured. Edit config.toml and set:\n'
-        printf '    [registry]\n'
-        printf '    address = "your-registry:443"\n\n'
-        printf 'Then run: peerdup-setup\n'
+        printf '\n\033[1;31mRegistry not configured - rerun peerdup-setup when ready.\033[0m\n'
         exit 0
     fi
 
