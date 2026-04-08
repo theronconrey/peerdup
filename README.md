@@ -32,8 +32,8 @@ discovery; all transfers are direct peer-to-peer via libtorrent.
 
 ### 1. Host the registry and relay (one always-on server)
 
-You need a host with a public IP and a DNS A record pointing to it.
-Docker and Docker Compose must be installed.
+You need a Linux host with a public IP, a DNS A record pointing to it, and
+[Docker CE](https://docs.docker.com/engine/install/) installed.
 
 ```bash
 git clone https://github.com/theronconrey/peerdup
@@ -41,9 +41,8 @@ cd peerdup
 ./start.sh
 ```
 
-`start.sh` prompts for your domain and email on first run, writes `.env`,
-then starts the stack. Caddy obtains a Let's Encrypt certificate automatically.
-Subsequent runs go straight to `docker compose up -d`.
+Prompts for your domain and email, then starts the stack. Caddy obtains a
+Let's Encrypt certificate automatically. Subsequent runs skip the prompts.
 
 ### 2. Install the daemon (each machine that syncs)
 
@@ -51,17 +50,17 @@ Subsequent runs go straight to `docker compose up -d`.
 curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 ```
 
-Handles libtorrent, clones the repo, and installs the daemon. Works on
+Detects your distro, installs libtorrent, and sets up the daemon. Works on
 Fedora, Ubuntu/Debian, and macOS.
 
-### 3. Start the daemon
+### 3. Configure and start
 
 ```bash
-~/.local/share/peerdup/daemon/start.sh
+peerdup-setup
 ```
 
-Prompts for your machine name, registry address, and optional settings on
-first run, writes `config.toml`, then starts the daemon.
+Prompts for your machine name, registry address, and optional settings, then
+starts the daemon. Run once - subsequent starts use the saved config.
 
 ### 4. Share a folder
 

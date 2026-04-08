@@ -73,13 +73,17 @@ fi
 
 pip install --user -e "$INSTALL_DIR/daemon/"
 
-# ── PATH reminder ──────────────────────────────────────────────────────────────
+# ── peerdup-setup command ──────────────────────────────────────────────────────
 
 mkdir -p "$BIN_DIR"
+ln -sf "$INSTALL_DIR/daemon/start.sh" "$BIN_DIR/peerdup-setup"
+ok "peerdup-setup linked to $BIN_DIR/peerdup-setup"
+
+# ── PATH reminder ──────────────────────────────────────────────────────────────
 
 if ! echo "$PATH" | grep -q "$BIN_DIR"; then
     warn "$BIN_DIR is not in your PATH"
-    warn "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+    warn "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.) then reopen your terminal:"
     printf '\n    export PATH="$HOME/.local/bin:$PATH"\n\n'
 fi
 
@@ -88,6 +92,4 @@ fi
 printf '\n'
 printf '\033[1;32mpeerdup installed.\033[0m\n\n'
 printf 'To configure and start the daemon:\n\n'
-printf '    %s/daemon/start.sh\n\n' "$INSTALL_DIR"
-printf 'Or if %s is in your PATH, you can run start.sh from anywhere:\n\n' "$BIN_DIR"
-printf '    peerdup-daemon --help\n\n'
+printf '    peerdup-setup\n\n'
