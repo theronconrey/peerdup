@@ -93,32 +93,13 @@ class SyncCoordinator:
         self._lt._on_status = _lt_bridge
         self._lt.start()
 
-        # Register with registry - retry with backoff until successful.
-        backoff = 1.0
-        while True:
-            try:
-                sig = self._identity.sign_register(self._identity_name)
-                self._registry.register_peer(
-                    self._identity.peer_id,
-                    self._identity_name,
-                    sig,
-                )
-                break
-            except Exception as exc:
-                log.warning(
-                    "Registry unavailable (%s) - retrying in %.0fs", exc, backoff
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
-
-        # Resume all persisted shares.
-        for share in self._db.list_shares():
-            if share.state != ShareState.PAUSED:
-                await self._activate_share(share.share_id, share.local_path)
-
-        # Start background tasks.
+        # Start background tasks immediately so the control socket is usable.
         asyncio.create_task(self._fs_event_loop())
         asyncio.create_task(self._status_update_loop())
+
+        # Connect to registry and resume shares in the background so startup
+        # doesn't block if the registry is temporarily unreachable.
+        asyncio.create_task(self._registry_connect_loop())
 
         # LAN multicast discovery (optional).
         if lan_config and lan_config.enabled:
@@ -914,6 +895,32 @@ class SyncCoordinator:
                     self._registry, share_id, handler, stop_ev,
                 )
             )
+
+    # ── Registry connect loop ─────────────────────────────────────────────────
+
+    async def _registry_connect_loop(self):
+        """Register with registry (retrying with backoff), then resume shares."""
+        backoff = 1.0
+        while True:
+            try:
+                sig = self._identity.sign_register(self._identity_name)
+                self._registry.register_peer(
+                    self._identity.peer_id,
+                    self._identity_name,
+                    sig,
+                )
+                log.info("Registered with registry")
+                break
+            except Exception as exc:
+                log.warning(
+                    "Registry unavailable (%s) - retrying in %.0fs", exc, backoff
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+        for share in self._db.list_shares():
+            if share.state != ShareState.PAUSED:
+                await self._activate_share(share.share_id, share.local_path)
 
     # ── File event loop ───────────────────────────────────────────────────────
 
