@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-SCRIPT_DIR="$(dirname "$0")"
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CONFIG_FILE="$SCRIPT_DIR/config.toml"
 
 prompt() {
