@@ -56,8 +56,17 @@ peerdup-setup
 ```
 
 On first run prompts for your machine name, registry address, and optional
-relay/LAN settings, writes `config.toml`, then starts the daemon. Subsequent
-runs skip the prompts and restart the daemon.
+relay/LAN settings, then writes `config.toml` and starts the daemon.
+
+After the daemon starts successfully, `peerdup-setup` offers to install a
+systemd user service (`~/.config/systemd/user/peerdup-daemon.service`).
+If you accept, subsequent runs of `peerdup-setup` simply restart the unit
+via `systemctl --user restart peerdup-daemon` instead of managing the process
+manually.
+
+You will also be asked whether to enable linger (`loginctl enable-linger`),
+which makes the service start at boot even before you log in - recommended
+for NAS or always-on machines, optional for laptops.
 
 TLS to the registry is enabled automatically when a registry address is set.
 Leave the registry address blank if you only need local-only shares.
@@ -67,6 +76,17 @@ The socket path is auto-detected:
 - Root/system installs: `/run/peerdup/control.sock`
 
 Override with `PEERDUP_SOCKET` if needed.
+
+### Useful systemd commands
+
+```bash
+systemctl --user status peerdup-daemon     # current state
+systemctl --user stop peerdup-daemon       # stop
+systemctl --user start peerdup-daemon      # start
+systemctl --user restart peerdup-daemon    # restart
+journalctl --user -u peerdup-daemon -f     # live logs
+journalctl --user -u peerdup-daemon -n 50  # last 50 lines
+```
 
 ## CLI reference
 
