@@ -54,11 +54,39 @@ from typing import Optional
 
 # ── Sub-configs ───────────────────────────────────────────────────────────────
 
+def _default_socket_path() -> str:
+    """
+    Return the default control socket path.
+
+    Prefers $XDG_RUNTIME_DIR/peerdup/control.sock (writable by the current
+    user without root, always set on systemd-based Linux).  Falls back to
+    /run/peerdup/control.sock for system (root) installs.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        return os.path.join(xdg, "peerdup", "control.sock")
+    return "/run/peerdup/control.sock"
+
+
+def _default_data_dir() -> str:
+    """
+    Return the default data directory.
+
+    Uses ~/.local/share/peerdup for user installs,
+    /var/lib/peerdup for system installs.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    # Only use the user path if we're not root.
+    if os.getuid() != 0:
+        return os.path.join(xdg, "peerdup")
+    return "/var/lib/peerdup"
+
+
 @dataclass
 class DaemonConfig:
     name:        str  = "peerdup-daemon"
-    data_dir:    str  = "/var/lib/peerdup"
-    socket_path: str  = "/run/peerdup/control.sock"
+    data_dir:    str  = field(default_factory=_default_data_dir)
+    socket_path: str  = field(default_factory=_default_socket_path)
     listen_port: int  = 55000
 
 
@@ -71,9 +99,16 @@ class RegistryConfig:
     key_file:  Optional[str]  = None
 
 
+def _default_identity_key() -> str:
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    if os.getuid() != 0:
+        return os.path.join(xdg, "peerdup", "identity.key")
+    return "/var/lib/peerdup/identity.key"
+
+
 @dataclass
 class IdentityConfig:
-    key_file: str  = "/var/lib/peerdup/identity.key"
+    key_file: str  = field(default_factory=_default_identity_key)
     name:     str  = "peerdup-node"
 
 

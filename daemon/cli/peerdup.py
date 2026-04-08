@@ -31,7 +31,33 @@ import grpc
 
 import os
 
-DEFAULT_SOCKET = os.environ.get("PEERDUP_SOCKET", "/run/peerdup/control.sock")
+def _default_socket() -> str:
+    """
+    Discover the control socket without requiring any configuration.
+
+    Resolution order:
+      1. PEERDUP_SOCKET env var (explicit override)
+      2. $XDG_RUNTIME_DIR/peerdup/control.sock  — user install (exists → use it)
+      3. /run/peerdup/control.sock              — system install (exists → use it)
+      4. $XDG_RUNTIME_DIR path as best-guess fallback (will fail with clear error)
+    """
+    if "PEERDUP_SOCKET" in os.environ:
+        return os.environ["PEERDUP_SOCKET"]
+
+    candidates = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        candidates.append(os.path.join(xdg, "peerdup", "control.sock"))
+    candidates.append("/run/peerdup/control.sock")
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    # Nothing found — return the XDG path so the error message is meaningful.
+    return candidates[0] if candidates else "/run/peerdup/control.sock"
+
+DEFAULT_SOCKET = _default_socket()
 
 
 def _channel(socket_path: str) -> grpc.Channel:
