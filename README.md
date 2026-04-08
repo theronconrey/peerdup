@@ -1,6 +1,6 @@
 # peerdup
 
-Private peer-to-peer file replication. Self-hosted alternative to Resilio Sync.
+Private peer-to-peer file replication — self-hosted, no central server.
 
 No file data passes through a central server. The registry only brokers peer
 discovery — all transfers are direct peer-to-peer via libtorrent.
