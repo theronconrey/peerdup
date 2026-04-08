@@ -7,11 +7,13 @@ build/
 .venv/
 venv/
 
-# Generated proto stubs — regenerate with: make proto
-registry_pb2.py
-registry_pb2_grpc.py
-control_pb2.py
-control_pb2_grpc.py
+# Generated proto stubs (auto-generated during pip install via setup.py)
+registry/registry/registry_pb2.py
+registry/registry/registry_pb2_grpc.py
+daemon/daemon/registry_pb2.py
+daemon/daemon/registry_pb2_grpc.py
+daemon/daemon/control_pb2.py
+daemon/daemon/control_pb2_grpc.py
 
 # Local state
 *.db

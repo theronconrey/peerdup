@@ -29,7 +29,9 @@ import sys
 import grpc
 
 
-DEFAULT_SOCKET = "/run/peerdup/control.sock"
+import os
+
+DEFAULT_SOCKET = os.environ.get("PEERDUP_SOCKET", "/run/peerdup/control.sock")
 
 
 def _channel(socket_path: str) -> grpc.Channel:
@@ -37,12 +39,43 @@ def _channel(socket_path: str) -> grpc.Channel:
 
 
 def _stub(socket_path: str):
-    import control_pb2_grpc  # type: ignore
+    from daemon import control_pb2_grpc  # type: ignore
     return control_pb2_grpc.ControlServiceStub(_channel(socket_path))
 
 
+def _resolve_share(stub, name_or_id: str) -> str:
+    """Resolve a share name or share_id to a share_id.
+
+    Tries exact name match first, then prefix match, then treats the
+    argument as a literal share_id.
+    """
+    from daemon import control_pb2  # type: ignore
+    try:
+        resp = stub.ListShares(control_pb2.ListSharesRequest())
+    except grpc.RpcError:
+        return name_or_id  # can't resolve, pass through and let the RPC fail
+
+    # Exact name match
+    for s in resp.shares:
+        if s.name == name_or_id:
+            return s.share_id
+
+    # share_id prefix match (user typed first few chars)
+    matches = [s for s in resp.shares if s.share_id.startswith(name_or_id)]
+    if len(matches) == 1:
+        return matches[0].share_id
+    if len(matches) > 1:
+        names = ", ".join(s.name for s in matches)
+        print(f"Error: ambiguous share reference '{name_or_id}' matches: {names}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Fall through — treat as full share_id
+    return name_or_id
+
+
 def cmd_identity(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
     try:
         resp = stub.ShowIdentity(control_pb2.IdentityRequest())
@@ -53,7 +86,7 @@ def cmd_identity(args):
 
 
 def cmd_share_list(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
     try:
         resp = stub.ListShares(control_pb2.ListSharesRequest())
@@ -66,10 +99,11 @@ def cmd_share_list(args):
 
 
 def cmd_share_info(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
-        r = stub.GetShareInfo(control_pb2.GetShareInfoRequest(share_id=args.share_id))
+        r = stub.GetShareInfo(control_pb2.GetShareInfoRequest(share_id=share_id))
     except grpc.RpcError as e:
         _err(e)
         return
@@ -100,11 +134,12 @@ def cmd_share_info(args):
 
 
 def cmd_share_peers(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         resp = stub.ListSharePeers(control_pb2.ListSharePeersRequest(
-            share_id = args.share_id,
+            share_id = share_id,
         ))
     except grpc.RpcError as e:
         _err(e)
@@ -143,7 +178,7 @@ def cmd_share_peers(args):
 
 
 def cmd_share_create(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
 
     import_key_hex = ""
@@ -182,11 +217,12 @@ def cmd_share_create(args):
 
 
 def cmd_share_grant(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         resp = stub.GrantAccess(control_pb2.GrantAccessRequest(
-            share_id   = args.share_id,
+            share_id   = share_id,
             peer_id    = args.peer_id,
             permission = args.permission,
         ))
@@ -202,11 +238,12 @@ def cmd_share_grant(args):
 
 
 def cmd_share_revoke(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         stub.RevokeAccess(control_pb2.RevokeAccessRequest(
-            share_id = args.share_id,
+            share_id = share_id,
             peer_id  = args.peer_id,
         ))
         print(f"Access revoked for peer {args.peer_id} on share {args.share_id}")
@@ -215,11 +252,12 @@ def cmd_share_revoke(args):
 
 
 def cmd_share_add(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         resp = stub.AddShare(control_pb2.AddShareRequest(
-            share_id   = args.share_id,
+            share_id   = share_id,
             local_path = args.path,
             permission = args.permission,
         ))
@@ -230,11 +268,12 @@ def cmd_share_add(args):
 
 
 def cmd_share_remove(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         stub.RemoveShare(control_pb2.RemoveShareRequest(
-            share_id     = args.share_id,
+            share_id     = share_id,
             delete_files = args.delete_files,
         ))
         print(f"Removed share {args.share_id}")
@@ -243,19 +282,20 @@ def cmd_share_remove(args):
 
 
 def cmd_share_set_limit(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
         up   = _parse_rate(args.up)   if args.up   else 0
         down = _parse_rate(args.down) if args.down else 0
         resp = stub.SetShareRateLimit(control_pb2.SetShareRateLimitRequest(
-            share_id       = args.share_id,
+            share_id       = share_id,
             upload_limit   = up,
             download_limit = down,
         ))
         up_str   = f"{_human(resp.upload_limit)}/s"   if resp.upload_limit   else "unlimited"
         down_str = f"{_human(resp.download_limit)}/s" if resp.download_limit else "unlimited"
-        print(f"Rate limits set for {args.share_id[:16]}..")
+        print(f"Rate limits set for {share_id[:16]}..")
         print(f"  upload   : {up_str}")
         print(f"  download : {down_str}")
     except grpc.RpcError as e:
@@ -263,27 +303,29 @@ def cmd_share_set_limit(args):
 
 
 def cmd_share_pause(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
-        stub.PauseShare(control_pb2.PauseShareRequest(share_id=args.share_id))
-        print(f"Paused share {args.share_id}")
+        stub.PauseShare(control_pb2.PauseShareRequest(share_id=share_id))
+        print(f"Paused share {share_id}")
     except grpc.RpcError as e:
         _err(e)
 
 
 def cmd_share_resume(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
     try:
-        stub.ResumeShare(control_pb2.ResumeShareRequest(share_id=args.share_id))
-        print(f"Resumed share {args.share_id}")
+        stub.ResumeShare(control_pb2.ResumeShareRequest(share_id=share_id))
+        print(f"Resumed share {share_id}")
     except grpc.RpcError as e:
         _err(e)
 
 
 def cmd_status(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
     try:
         resp = stub.Status(control_pb2.StatusRequest())
@@ -295,7 +337,7 @@ def cmd_status(args):
 
 
 def cmd_watch(args):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
     print("Watching for status events (Ctrl-C to stop)...")
     try:
@@ -383,7 +425,7 @@ def _print_shares(shares):
 
 
 def _print_event(event):
-    import control_pb2  # type: ignore
+    from daemon import control_pb2  # type: ignore
     type_names = {
         control_pb2.StatusEvent.EVENT_TYPE_SHARE_UPDATED:  "SHARE",
         control_pb2.StatusEvent.EVENT_TYPE_PEER_EVENT:     "PEER",

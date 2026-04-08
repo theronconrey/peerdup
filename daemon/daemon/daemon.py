@@ -67,7 +67,7 @@ def setup_logging(level: str):
 # ── Control socket server ─────────────────────────────────────────────────────
 
 def build_control_server(socket_path: str, coordinator: SyncCoordinator) -> grpc.Server:
-    import control_pb2_grpc  # type: ignore
+    from daemon import control_pb2_grpc  # type: ignore
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=4),

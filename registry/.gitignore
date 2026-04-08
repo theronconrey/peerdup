@@ -7,9 +7,9 @@ build/
 .venv/
 venv/
 
-# Generated proto stubs (regenerate with: make proto)
-registry_pb2.py
-registry_pb2_grpc.py
+# Generated proto stubs (auto-generated during pip install via setup.py)
+registry/registry_pb2.py
+registry/registry_pb2_grpc.py
 
 # Database
 *.db

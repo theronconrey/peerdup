@@ -89,7 +89,7 @@ class RegistryClient:
 
     def connect(self):
         """Open the gRPC channel. Call once at startup."""
-        import registry_pb2_grpc as pb_grpc  # type: ignore
+        from daemon import registry_pb2_grpc as pb_grpc  # type: ignore
 
         interceptor = _BearerInterceptor(lambda: self._token)
 
@@ -131,7 +131,7 @@ class RegistryClient:
 
     def register_peer(self, peer_id: str, name: str, signature: bytes) -> str:
         """Register peer and store the returned bearer token. Returns token."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         resp = self._stub.RegisterPeer(pb.RegisterPeerRequest(
             peer_id   = peer_id,
             name      = name,
@@ -152,7 +152,7 @@ class RegistryClient:
         internal_addrs: list of {"host": str, "port": int, "is_lan": bool}
         Returns (observed_external_host, observed_external_port, granted_ttl).
         """
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
 
         proto_addrs = [
             pb.PeerAddress(host=a["host"], port=a["port"], is_lan=a.get("is_lan", False))
@@ -174,7 +174,7 @@ class RegistryClient:
 
     def get_share_peers(self, share_id: str, online_only: bool = True):
         """Snapshot of peers for a share. Returns list of SharePeer protos."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         resp = self._stub.GetSharePeers(pb.GetSharePeersRequest(
             share_id   = share_id,
             online_only = online_only,
@@ -186,7 +186,7 @@ class RegistryClient:
         Returns a gRPC streaming iterator of PeerEvent protos.
         Caller is responsible for iterating and handling RpcError / StopIteration.
         """
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         return self._stub.WatchSharePeers(pb.WatchSharePeersRequest(
             share_id        = share_id,
             include_offline = include_offline,
@@ -196,7 +196,7 @@ class RegistryClient:
 
     def create_share(self, share_id: str, name: str, signature: bytes):
         """Call registry CreateShare. Returns the Share proto."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         return self._stub.CreateShare(pb.CreateShareRequest(
             share_id  = share_id,
             name      = name,
@@ -204,13 +204,13 @@ class RegistryClient:
         )).share
 
     def get_share(self, share_id: str):
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         return self._stub.GetShare(pb.GetShareRequest(share_id=share_id)).share
 
     def add_peer_to_share(self, share_id: str, peer_id: str,
                           permission_name: str = "PERMISSION_READ_WRITE"):
         """Grant a peer access to a share. permission_name is the proto enum name."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         perm = pb.Permission.Value(permission_name)
         return self._stub.AddPeerToShare(pb.AddPeerToShareRequest(
             share_id   = share_id,
@@ -220,7 +220,7 @@ class RegistryClient:
 
     def remove_peer_from_share(self, share_id: str, peer_id: str):
         """Revoke a peer's access to a share."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
         self._stub.RemovePeerFromShare(pb.RemovePeerFromShareRequest(
             share_id = share_id,
             peer_id  = peer_id,
@@ -228,7 +228,7 @@ class RegistryClient:
 
     def health(self) -> bool:
         try:
-            import registry_pb2 as pb  # type: ignore
+            from daemon import registry_pb2 as pb  # type: ignore
             resp = self._stub.Health(pb.HealthRequest())
             return resp.status == "ok"
         except grpc.RpcError:

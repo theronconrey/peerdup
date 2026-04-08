@@ -6,11 +6,11 @@ build/
 .venv/
 venv/
 
-# Generated stubs
-registry_pb2.py
-registry_pb2_grpc.py
-control_pb2.py
-control_pb2_grpc.py
+# Generated proto stubs (auto-generated during pip install via setup.py)
+daemon/registry_pb2.py
+daemon/registry_pb2_grpc.py
+daemon/control_pb2.py
+daemon/control_pb2_grpc.py
 
 # State
 *.db

@@ -108,8 +108,8 @@ class RegistryServicer:
 
         # Lazy-import generated stubs so this module can be read
         # before code generation has run.
-        import registry_pb2 as pb                        # type: ignore
-        import registry_pb2_grpc as pb_grpc              # type: ignore
+        from registry import registry_pb2 as pb           # type: ignore
+        from registry import registry_pb2_grpc as pb_grpc  # type: ignore
         from google.protobuf.timestamp_pb2 import Timestamp
         self._pb        = pb
         self._pb_grpc   = pb_grpc

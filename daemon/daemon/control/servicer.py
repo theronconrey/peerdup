@@ -21,8 +21,8 @@ class ControlServicer:
     def __init__(self, coordinator):
         self._coord = coordinator
 
-        import control_pb2      # type: ignore
-        import control_pb2_grpc  # type: ignore
+        from daemon import control_pb2      # type: ignore
+        from daemon import control_pb2_grpc  # type: ignore
         self._pb     = control_pb2
         self._pb_grpc = control_pb2_grpc
 

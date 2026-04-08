@@ -548,7 +548,7 @@ class SyncCoordinator:
 
     def _make_peer_event_handler(self, share_id: str):
         """Return a per-share event handler closure."""
-        import registry_pb2 as pb  # type: ignore
+        from daemon import registry_pb2 as pb  # type: ignore
 
         async def _handler(event):
             peer_id = event.peer.peer_id

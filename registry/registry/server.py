@@ -87,7 +87,7 @@ def build_server_credentials(tls_cfg: dict):
 
 def build_grpc_server(config: dict, session_factory) -> grpc.Server:
     import asyncio
-    import registry_pb2_grpc as pb_grpc  # type: ignore
+    from registry import registry_pb2_grpc as pb_grpc  # type: ignore
 
     try:
         loop = asyncio.get_running_loop()
