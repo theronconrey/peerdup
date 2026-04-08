@@ -84,10 +84,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
     prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "y"
 
     printf '\n'
-    prompt_yn RELAY_ENABLED "Enable relay fallback for symmetric NAT" "n"
-    if [ "$RELAY_ENABLED" = "true" ]; then
-        prompt RELAY_ADDRESS "Relay address (host:port)"
-        prompt RELAY_TIMEOUT "Seconds to wait for remote peer at relay" "120"
+    prompt_optional RELAY_ADDRESS "Relay address (host:port) for when two peers can't reach each other directly" "leave blank to skip"
+    if [ -n "$RELAY_ADDRESS" ]; then
+        RELAY_ENABLED="true"
+        RELAY_TIMEOUT="120"
+    else
+        RELAY_ENABLED="false"
     fi
 
     printf '\n'
