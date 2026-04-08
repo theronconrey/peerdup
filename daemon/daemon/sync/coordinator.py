@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -815,11 +816,16 @@ class SyncCoordinator:
 
         self._lt.remove_share(share_id, delete_files=False)
         try:
-            ih = self._lt.add_share(
-                share_id, share.local_path,
-                torrent_path=torrent_path,
-                seed_mode=False,
-                info_hash=remote_info_hash,
+            loop = asyncio.get_running_loop()
+            ih = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._lt.add_share,
+                    share_id, share.local_path,
+                    torrent_path=torrent_path,
+                    seed_mode=False,
+                    info_hash=remote_info_hash,
+                ),
             )
             self._db.set_share_state(share_id, ShareState.SYNCING, info_hash=ih)
             log.info("Switched to remote torrent share=%s ih=%s", share_id, ih)
@@ -860,11 +866,16 @@ class SyncCoordinator:
                 pass
 
         try:
-            ih = self._lt.add_share(
-                share_id, local_path,
-                torrent_path=torrent_path,
-                seed_mode=has_files,
-                info_hash=peer_info_hash,
+            loop = asyncio.get_running_loop()
+            ih = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._lt.add_share,
+                    share_id, local_path,
+                    torrent_path=torrent_path,
+                    seed_mode=has_files,
+                    info_hash=peer_info_hash,
+                ),
             )
             self._db.set_share_state(share_id,
                                      ShareState.SEEDING if has_files
@@ -984,10 +995,15 @@ class SyncCoordinator:
         try:
             # Remove old handle and re-add with fresh metadata.
             self._lt.remove_share(evt.share_id, delete_files=False)
-            ih = self._lt.add_share(
-                evt.share_id, share.local_path,
-                torrent_path=torrent_path,
-                seed_mode=True,
+            loop = asyncio.get_running_loop()
+            ih = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._lt.add_share,
+                    evt.share_id, share.local_path,
+                    torrent_path=torrent_path,
+                    seed_mode=True,
+                ),
             )
             self._db.set_share_state(evt.share_id, ShareState.SEEDING,
                                      info_hash=ih)

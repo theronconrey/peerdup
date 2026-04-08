@@ -128,45 +128,52 @@ class LibtorrentSession:
 
         Path(local_path).mkdir(parents=True, exist_ok=True)
 
+        # Build torrent params BEFORE acquiring the lock.
+        # _make_torrent_info calls lt.add_files + lt.set_piece_hashes which do
+        # blocking directory-walk / full-read I/O — keeping them outside the lock
+        # means the session remains usable for other shares during the hashing.
+        if torrent_path and os.path.exists(torrent_path):
+            info = lt.torrent_info(torrent_path)
+            params = {
+                "ti":        info,
+                "save_path": str(Path(local_path).parent),
+                "flags":     lt.torrent_flags.default_flags,
+            }
+            if seed_mode:
+                params["flags"] |= lt.torrent_flags.seed_mode
+        elif info_hash and not seed_mode:
+            # Magnet-style: add with only info_hash; metadata fetched via
+            # the ut_metadata (BEP 9) extension once we connect to a peer.
+            atp = lt.add_torrent_params()
+            ih_bytes = bytes.fromhex(info_hash)
+            sha1 = lt.sha1_hash(ih_bytes)
+            if hasattr(lt, "info_hash_t"):
+                atp.info_hashes = lt.info_hash_t(sha1)
+            else:
+                atp.info_hash = sha1
+            atp.save_path = str(Path(local_path).parent)
+            params = atp
+        else:
+            # Create torrent metadata from the directory contents.
+            # This is the slow path: lt.add_files walks the tree and
+            # lt.set_piece_hashes reads every byte to compute piece hashes.
+            info = self._make_torrent_info(local_path)
+            if torrent_path:
+                self._save_torrent(info, torrent_path)
+            params = {
+                "ti":        info,
+                "save_path": str(Path(local_path).parent),
+                "flags":     lt.torrent_flags.default_flags,
+            }
+            if seed_mode:
+                params["flags"] |= lt.torrent_flags.seed_mode
+
+        # Lock only for the fast session.add_torrent call and handle bookkeeping.
         with self._lock:
             if share_id in self._handles:
                 log.debug("Share %s already has a torrent handle", share_id)
                 ih = self._handles[share_id].info_hash()
                 return str(ih)
-
-            if torrent_path and os.path.exists(torrent_path):
-                info = lt.torrent_info(torrent_path)
-                params = {
-                    "ti":        info,
-                    "save_path": str(Path(local_path).parent),
-                    "flags":     lt.torrent_flags.default_flags,
-                }
-                if seed_mode:
-                    params["flags"] |= lt.torrent_flags.seed_mode
-            elif info_hash and not seed_mode:
-                # Magnet-style: add with only info_hash; metadata fetched via
-                # the ut_metadata (BEP 9) extension once we connect to a peer.
-                atp = lt.add_torrent_params()
-                ih_bytes = bytes.fromhex(info_hash)
-                sha1 = lt.sha1_hash(ih_bytes)
-                if hasattr(lt, "info_hash_t"):
-                    atp.info_hashes = lt.info_hash_t(sha1)
-                else:
-                    atp.info_hash = sha1
-                atp.save_path = str(Path(local_path).parent)
-                params = atp
-            else:
-                # Create torrent metadata from the directory contents.
-                info = self._make_torrent_info(local_path)
-                if torrent_path:
-                    self._save_torrent(info, torrent_path)
-                params = {
-                    "ti":        info,
-                    "save_path": str(Path(local_path).parent),
-                    "flags":     lt.torrent_flags.default_flags,
-                }
-                if seed_mode:
-                    params["flags"] |= lt.torrent_flags.seed_mode
 
             handle = self._session.add_torrent(params)
             handle.set_max_connections(50)
