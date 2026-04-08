@@ -28,25 +28,26 @@ the registry.
 The registry only brokers connections — it never touches file data.
 All transfers are direct peer-to-peer via libtorrent.
 
-## Quickstart
+## Installation
 
 ```bash
-# 1. Install
-git clone <repo>
-cd peerdup-registry
-make install
+pip install -e .
+```
 
-# 2. Generate gRPC stubs from proto
-make proto
+Proto stubs are generated automatically during install. No separate
+code generation step needed.
 
-# 3. (Optional) Generate dev TLS cert
-make cert
+## Setup
 
-# 4. Copy and edit config
+```bash
+# Copy and edit config
 cp config.example.toml config.toml
 
-# 5. Run
-registry-server --config config.toml
+# (Optional) Generate dev TLS cert
+make cert
+
+# Run
+peerdup-registry --config config.toml
 ```
 
 ## Security model
@@ -121,13 +122,6 @@ no external dependencies. For production:
 
 - Run behind a reverse proxy (nginx/caddy) or enable TLS directly
 - Use PostgreSQL by setting `database_url = "postgresql://..."`
-- Deploy as a systemd service (see `scripts/` for a template)
+- Deploy as a systemd service (see `scripts/peerdup-registry.service`)
 - The registry is stateless except for the database — straightforward to
   containerise with a volume mount for the DB
-
-## Roadmap
-
-- [ ] Client daemon (libtorrent integration)
-- [ ] LAN multicast discovery (no registry needed on same subnet)
-- [ ] CLI tool (`peerdup peer add`, `peerdup share create`, etc.)
-- [ ] Relay server for peers behind symmetric NAT

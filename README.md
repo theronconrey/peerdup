@@ -1,41 +1,101 @@
 # peerdup
 
-Private peer-to-peer file replication. Self-hosted torrenty goodness.
+Private peer-to-peer file replication. Self-hosted alternative to Resilio Sync.
 
 No file data passes through a central server. The registry only brokers peer
 discovery — all transfers are direct peer-to-peer via libtorrent.
 
 ## Quickstart
 
+### 1. Install dependencies (Fedora)
+
 ```bash
-# 1. Start the registry (once, on an always-on host)
-cd registry && make install && make proto
-cp config.example.toml config.toml
-peerdup-registry --config config.toml
+sudo dnf install rb_libtorrent-python3
+```
 
-# 2. Start the daemon on each machine
-cd daemon && make install && make proto
-cp config.example.toml config.toml
-peerdup-daemon --config config.toml
+### 2. Clone and install
 
-# 3. Share a folder
-peerdup share create photos /path/to/photos
-# → prints share_id
+```bash
+git clone https://github.com/theronconrey/peerdup
+cd peerdup
 
-# 4. Grant access to another peer (get their peer_id with: peerdup identity)
-peerdup share grant <share_id> <their-peer-id>
+# Registry (run once, on an always-on host)
+pip install -e registry/
 
-# 5. On the other machine
-peerdup share add <share_id> /path/to/local/dir
+# Daemon (run on every machine that participates in a sync)
+pip install -e daemon/
+```
 
-# 6. Check who's online
-peerdup share peers <share_id>
+Proto stubs are generated automatically during `pip install` — no manual
+code generation step required.
+
+### 3. Configure
+
+```bash
+# Registry
+cp registry/config.example.toml registry/config.toml
+# edit: set host, port, database_url
+
+# Daemon
+cp daemon/config.example.toml daemon/config.toml
+# edit: set registry.address, identity.name
+
+export PEERDUP_SOCKET=/path/to/control.sock  # if not using the default
+```
+
+### 4. Run
+
+```bash
+# Terminal 1 — registry
+peerdup-registry --config registry/config.toml
+
+# Terminal 2 — daemon
+peerdup-daemon --config daemon/config.toml
+```
+
+### 5. Share a folder
+
+```bash
+# Create a share (Machine A — owner)
+peerdup share create photos ~/Pictures
+# → prints share_id + fingerprint
+
+# Grant access to another peer
+peerdup share grant photos <their-peer-id>
+
+# Join the share (Machine B)
+peerdup share add <share_id> ~/Pictures
+
+# Verify both peers are online
+peerdup share peers photos
 ```
 
 ## Layout
 
 ```
 peerdup/
-├── registry/     # Registry server (peer discovery, ACL)
+├── registry/     # Registry server — peer discovery, ACL, presence
 └── daemon/       # Peer daemon + CLI
 ```
+
+## CLI reference
+
+```bash
+peerdup identity
+peerdup share list
+peerdup share info   <name-or-id>
+peerdup share peers  <name-or-id>
+peerdup share create <name> <path> [--import-key <file>]
+peerdup share add    <share_id> <path>
+peerdup share grant  <name-or-id> <peer_id>
+peerdup share revoke <name-or-id> <peer_id>
+peerdup share remove <name-or-id>
+peerdup share set-limit <name-or-id> --up 10M --down 50M
+peerdup share pause  <name-or-id>
+peerdup share resume <name-or-id>
+peerdup status
+peerdup watch
+```
+
+Share commands accept either a share name (`photos`) or a full share_id.
+Set `PEERDUP_SOCKET` to avoid passing `--socket` on every command.

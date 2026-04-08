@@ -4,15 +4,15 @@ Peer daemon for the peerdup private P2P file replication system.
 
 Runs on each machine that participates in a sync. Uses inotify (via watchdog)
 to detect local file changes, announces presence to the registry, and uses
-libtorrent for direct peer-to-peer transfers — no file data ever passes through
-the registry.
+libtorrent for direct peer-to-peer transfers — no file data ever passes
+through the registry.
 
 ## Architecture
 
 ```
                     ┌─────────────────┐
                     │    Registry     │
-                    │  (peerdup-registry) │
+                    │ (peerdup-registry) │
                     └────────┬────────┘
                              │ gRPC (TLS)
               announce / WatchSharePeers
@@ -30,30 +30,74 @@ the registry.
              └─────────────┘
 ```
 
-## Quickstart
+## Installation
+
+### Fedora
 
 ```bash
-# 1. Install
-git clone <repo>
-cd peerdup-daemon
-make install
+sudo dnf install rb_libtorrent-python3
+pip install -e .
+```
 
-# 2. Generate gRPC stubs
-make proto
+### Other Linux / macOS
 
-# 3. Configure
+```bash
+pip install libtorrent   # or install system package equivalent
+pip install -e .
+```
+
+Proto stubs are generated automatically during `pip install` — no manual
+code generation step required.
+
+## Setup
+
+```bash
 cp config.example.toml config.toml
-# edit config.toml — set registry address, peer name, etc.
+# edit: set registry.address, identity.name, daemon.data_dir
 
-# 4. Run
 peerdup-daemon --config config.toml
+```
 
-# 5. In another terminal — add a share
-peerdup share add <share_id> /path/to/local/dir
+Set `PEERDUP_SOCKET` to avoid passing `--socket` on every CLI command:
 
-# 6. Check status
+```bash
+export PEERDUP_SOCKET=/run/peerdup/control.sock
+```
+
+## CLI reference
+
+Share commands accept either the share **name** or the full **share_id**.
+
+```bash
+peerdup identity
 peerdup share list
-peerdup watch        # live event stream
+peerdup share info   <name-or-id>          # metadata, no peer roster
+peerdup share peers  <name-or-id>          # peer roster: online/offline
+peerdup share create <name> <path>         # create share, print share_id + fingerprint
+peerdup share create <name> <path> --import-key <file>   # import existing keypair
+peerdup share add    <share_id> <path>     # join an existing share
+peerdup share grant  <name-or-id> <peer_id>
+peerdup share revoke <name-or-id> <peer_id>
+peerdup share remove <name-or-id>
+peerdup share set-limit <name-or-id> --up 10M --down 50M  # 0 = unlimited
+peerdup share pause  <name-or-id>
+peerdup share resume <name-or-id>
+peerdup status
+peerdup watch                              # live event stream
+```
+
+### Typical first-time flow
+
+```bash
+# Machine A (owner)
+peerdup share create photos ~/Pictures
+# → prints share_id + fingerprint
+
+peerdup share grant photos <machine-b-peer-id>
+
+# Machine B
+peerdup share add <share_id> ~/Pictures
+peerdup share peers photos   # verify both online
 ```
 
 ## Component overview
@@ -66,35 +110,11 @@ peerdup watch        # live event stream
 | `daemon/registry/client.py` | gRPC registry client + WatchSharePeers reconnect loop |
 | `daemon/watcher/fs.py` | inotify filesystem watcher with debouncing |
 | `daemon/torrent/session.py` | libtorrent session, private swarm, peer injection |
+| `daemon/lan/discovery.py` | UDP multicast LAN discovery (239.193.0.0:49152) |
 | `daemon/sync/coordinator.py` | Orchestrates all the above |
 | `daemon/control/servicer.py` | ControlService gRPC over Unix socket (for CLI) |
 | `daemon/daemon.py` | Entrypoint, boots all components |
 | `cli/peerdup.py` | CLI tool — thin gRPC client to control socket |
-
-## CLI reference
-
-```
-peerdup identity                            # show peer_id
-peerdup share list                          # list active shares
-peerdup share add <share_id> <path>         # add share at runtime
-peerdup share add <share_id> <path> --permission ro
-peerdup share remove <share_id>             # remove share
-peerdup share remove <share_id> --delete-files
-peerdup share pause <share_id>              # pause syncing
-peerdup share resume <share_id>             # resume syncing
-peerdup status                              # snapshot status
-peerdup watch                               # live status stream
-```
-
-## libtorrent on Fedora
-
-```bash
-# Fedora provides libtorrent-rasterbar Python bindings via dnf:
-sudo dnf install rb_libtorrent-python3
-
-# Or install from PyPI (may need build tools):
-pip install libtorrent
-```
 
 ## Security model
 
@@ -106,13 +126,16 @@ with 0600 permissions — the daemon refuses to start if it's world-readable.
 `share_id || peer_id || canonical(addrs) || ttl` — covering addresses
 prevents a rogue registry from injecting arbitrary peer addresses.
 
+**LAN discovery**: UDP multicast packets are signed with the peer's Ed25519
+key and verified before injection into libtorrent. Only peers already in the
+ACL cache are accepted.
+
 **Control socket**: The Unix domain socket is created with 0600 permissions,
 accessible only to the daemon's user. No authentication needed — filesystem
 permissions are the access control.
 
 **Transport**: TLS to the registry. libtorrent uses protocol encryption
-between peers. Set `out_enc_policy = forced` in libtorrent config for
-mandatory encryption (currently set to `enabled` = prefer but allow fallback).
+between peers (prefer-encrypted; set `out_enc_policy = forced` for mandatory).
 
 ## Deployment (systemd)
 
@@ -121,26 +144,38 @@ mandatory encryption (currently set to `enabled` = prefer but allow fallback).
 sudo useradd -r -s /sbin/nologin peerdup
 
 # Install
-sudo mkdir -p /opt/peerdup-daemon /etc/peerdup /var/lib/peerdup
-sudo python3 -m venv /opt/peerdup-daemon/.venv
-sudo /opt/peerdup-daemon/.venv/bin/pip install -e .
+sudo mkdir -p /etc/peerdup /var/lib/peerdup
+sudo pip install -e /path/to/peerdup/daemon
 sudo cp config.example.toml /etc/peerdup/config.toml
 sudo chown -R peerdup:peerdup /var/lib/peerdup
+
+# Edit config — set registry.address, data_dir, identity.key_file
+sudo nano /etc/peerdup/config.toml
 
 # Install and start service
 sudo cp scripts/peerdup-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now peerdup-daemon
 
-# Use CLI as the peerdup user (or add yourself to peerdup group + chmod g+rw socket)
+# CLI access (add yourself to peerdup group and adjust socket perms, or use sudo)
 sudo -u peerdup peerdup share list
 ```
 
-## Roadmap
+## Configuration reference
 
-- [ ] LAN multicast discovery (bypass registry on same subnet)
-- [ ] Relay server support for symmetric NAT
-- [ ] Per-share bandwidth throttling via CLI
-- [ ] File conflict resolution strategy (last-write-wins vs. versioned)
-- [ ] `peerdup share create` — create a new share in the registry from CLI
-- [ ] Mobile clients (iOS/Android) via REST bridge
+See [`config.example.toml`](config.example.toml) for all options with comments.
+
+| Section | Key | Default | Description |
+|---------|-----|---------|-------------|
+| `[daemon]` | `name` | — | Human-readable peer name |
+| `[daemon]` | `data_dir` | `/var/lib/peerdup` | State DB + torrent cache |
+| `[daemon]` | `socket_path` | `/run/peerdup/control.sock` | CLI control socket |
+| `[daemon]` | `listen_port` | `55000` | libtorrent listen port |
+| `[registry]` | `address` | — | `host:port` of registry |
+| `[registry]` | `tls` | `true` | Enable TLS to registry |
+| `[identity]` | `key_file` | `/var/lib/peerdup/identity.key` | Ed25519 private key |
+| `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec) |
+| `[libtorrent]` | `download_rate_limit` | `0` | Global download cap (bytes/sec) |
+| `[lan]` | `enabled` | `true` | LAN multicast discovery |
+| `[lan]` | `multicast_group` | `239.193.0.0` | Multicast group |
+| `[lan]` | `multicast_port` | `49152` | Multicast port |
