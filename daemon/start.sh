@@ -26,6 +26,21 @@ prompt() {
     done
 }
 
+prompt_optional() {
+    # prompt_optional <var_name> <prompt_text> [hint]
+    var="$1"
+    msg="$2"
+    hint="$3"
+
+    if [ -n "$hint" ]; then
+        printf '%s (leave blank to skip - %s): ' "$msg" "$hint"
+    else
+        printf '%s (leave blank to skip): ' "$msg"
+    fi
+    read -r value
+    eval "$var=\$value"
+}
+
 prompt_yn() {
     # prompt_yn <var_name> <prompt_text> <default y|n>
     var="$1"
@@ -49,15 +64,20 @@ if [ ! -f "$CONFIG_FILE" ]; then
     printf '====================\n\n'
     printf 'No config.toml found. Answer a few questions to get started.\n\n'
 
-    prompt PEER_NAME        "Name for this machine (e.g. nas, laptop)"
-    prompt REGISTRY_ADDRESS "Registry address (host:port)"
-    prompt LISTEN_PORT      "libtorrent listen port" "55000"
+    prompt PEER_NAME "Name for this machine (e.g. nas, laptop)"
+    prompt_optional REGISTRY_ADDRESS "Registry address (host:port)" "set later in config.toml"
+    prompt LISTEN_PORT "libtorrent listen port" "55000"
 
     printf '\n'
-    prompt_yn TLS_ENABLED "Use TLS for registry connection" "y"
-    if [ "$TLS_ENABLED" = "true" ]; then
-        printf 'CA cert file path (leave blank to use system CAs): '
-        read -r CA_FILE
+    if [ -n "$REGISTRY_ADDRESS" ]; then
+        prompt_yn TLS_ENABLED "Use TLS for registry connection" "y"
+        if [ "$TLS_ENABLED" = "true" ]; then
+            printf 'CA cert file path (leave blank to use system CAs): '
+            read -r CA_FILE
+        fi
+    else
+        TLS_ENABLED="true"
+        printf 'Registry not set - TLS will default to enabled when you add it.\n'
     fi
 
     printf '\n'
@@ -93,13 +113,19 @@ pair_timeout = $RELAY_TIMEOUT"
 enabled = false"
     fi
 
+    if [ -z "$REGISTRY_ADDRESS" ]; then
+        REGISTRY_LINE="# address = \"\"  # set this before starting the daemon"
+    else
+        REGISTRY_LINE="address = \"$REGISTRY_ADDRESS\""
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 [daemon]
 name        = "$PEER_NAME"
 listen_port = $LISTEN_PORT
 
 [registry]
-address = "$REGISTRY_ADDRESS"
+$REGISTRY_LINE
 tls     = $TLS_ENABLED$CA_FILE_LINE
 
 [identity]
@@ -121,7 +147,17 @@ $RELAY_SECTION
 level = "$LOG_LEVEL"
 EOF
 
-    printf '\nConfiguration saved to config.toml\n\n'
+    printf '\nConfiguration saved to config.toml\n'
+
+    if [ -z "$REGISTRY_ADDRESS" ]; then
+        printf '\nRegistry not configured. Edit config.toml and set:\n'
+        printf '    [registry]\n'
+        printf '    address = "your-registry:443"\n\n'
+        printf 'Then run: peerdup-setup\n'
+        exit 0
+    fi
+
+    printf '\n'
 else
     printf 'Using existing config.toml\n\n'
 fi
