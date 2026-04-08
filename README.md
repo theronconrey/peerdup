@@ -9,7 +9,7 @@ discovery; all transfers are direct peer-to-peer via libtorrent.
 
 ```
 ┌─────────────────┐
-│    Registry     │   gRPC / TLS  - peer discovery, ACL, presence
+│    Registry     │   gRPC / TLS  - peer discovery, ACL, presence (optional)
 └────────┬────────┘
          │ announce / WatchSharePeers
   ┌──────┴──────┐
@@ -28,6 +28,13 @@ discovery; all transfers are direct peer-to-peer via libtorrent.
 └─────────────┘
 ```
 
+Two sync modes:
+
+| Mode | Registry needed | Discovery | Access control |
+|------|----------------|-----------|---------------|
+| `registry` | Yes | Registry + LAN | ACL enforced by registry |
+| `local` | No | LAN multicast only | Anyone on LAN with the share_id |
+
 ## Quickstart
 
 ### 1. Host the registry and relay (one always-on server)
@@ -43,6 +50,9 @@ cd peerdup
 
 Prompts for your domain and email, then starts the stack. Caddy obtains a
 Let's Encrypt certificate automatically. Subsequent runs skip the prompts.
+
+> **LAN-only?** If all your peers are on the same network, you can skip this
+> step and use `--local` shares instead - no server required.
 
 ### 2. Install the daemon (each machine that syncs)
 
@@ -60,22 +70,31 @@ peerdup-setup
 ```
 
 Prompts for your machine name, registry address, and optional settings, then
-starts the daemon. Run once - subsequent starts use the saved config.
+starts the daemon. Leave registry blank if you're using local-only shares.
 
 ### 4. Share a folder
 
-```bash
-# Machine A - create a share and grant access
-peerdup share create photos ~/Pictures
-# → prints share_id + fingerprint
+#### With a registry (access-controlled)
 
+```bash
+# Machine A - create share and grant access
+peerdup share create photos ~/Pictures
 peerdup share grant photos <machine-b-peer-id>
 
-# Machine B - join the share
+# Machine B - join
 peerdup share add <share_id> ~/Pictures
-
-# Verify both peers are online
 peerdup share peers photos
+```
+
+#### Local-only (LAN, no registry needed)
+
+```bash
+# Machine A
+peerdup share create photos ~/Pictures --local
+# → prints share_id
+
+# Machine B (same LAN)
+peerdup share add <share_id> ~/Pictures --local
 ```
 
 ## Layout
@@ -100,8 +119,8 @@ peerdup identity
 peerdup share list
 peerdup share info   <name-or-id>
 peerdup share peers  <name-or-id>
-peerdup share create <name> <path> [--import-key <file>] [--conflict <strategy>]
-peerdup share add    <share_id> <path> [--conflict <strategy>]
+peerdup share create <name> <path> [--local] [--import-key <file>] [--conflict <strategy>]
+peerdup share add    <share_id> <path> [--local] [--conflict <strategy>]
 peerdup share grant  <name-or-id> <peer_id>
 peerdup share revoke <name-or-id> <peer_id>
 peerdup share remove <name-or-id>
@@ -118,6 +137,8 @@ peerdup watch
 The socket path is auto-detected from `$XDG_RUNTIME_DIR` (user installs) or
 `/run/peerdup/control.sock` (system installs). Override with `PEERDUP_SOCKET`.
 
+`peerdup share list` shows a `MODE` column (`registry` or `local`) for each share.
+
 ## Conflict resolution
 
 When two peers independently modify the same file, peerdup detects the
@@ -131,16 +152,9 @@ conflict strategy:
 | `ask` | Pause the share and record the conflict; resolve manually |
 
 ```bash
-# Set strategy at share creation
 peerdup share create docs ~/Documents --conflict rename_conflict
-
-# Change strategy on an existing share
 peerdup share set-conflict docs ask
-
-# List pending conflicts (ask strategy)
 peerdup share conflicts docs
-
-# Resolve
 peerdup share resolve 3 keep-local
 peerdup share resolve 3 keep-remote
 ```
@@ -150,8 +164,8 @@ peerdup share resolve 3 keep-remote
 ## Relay
 
 For peers behind symmetric NAT that can't connect directly, the relay is
-included in the Docker stack and exposed on TCP port 55002. Enable it in
-each daemon's config (or via `./start.sh` prompts):
+included in the Docker stack and exposed on TCP port 55002. Enable it via
+`peerdup-setup` prompts or manually in `config.toml`:
 
 ```toml
 [relay]
@@ -160,5 +174,4 @@ address = "your-domain:55002"
 ```
 
 The daemon tries a direct connection and a relay bridge simultaneously.
-libtorrent uses whichever connects first - the relay only adds latency
-when the direct path fails.
+libtorrent uses whichever connects first.

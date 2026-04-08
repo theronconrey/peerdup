@@ -11,7 +11,7 @@ through the registry.
 
 ```
                     ┌─────────────────┐
-                    │    Registry     │
+                    │    Registry     │   (optional - not needed for local shares)
                     │ (peerdup-registry) │
                     └────────┬────────┘
                              │ gRPC (TLS)
@@ -45,24 +45,28 @@ relay bridge simultaneously - libtorrent uses whichever connects first.
 curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 ```
 
-Handles libtorrent, clones the repo to `~/.local/share/peerdup`, and installs
-the daemon. Works on Fedora, Ubuntu/Debian, and macOS.
+Detects your distro, installs libtorrent, clones the repo to
+`~/.local/share/peerdup`, and installs the daemon. Works on Fedora,
+Ubuntu/Debian, and macOS.
 
 ## Setup
 
 ```bash
-~/.local/share/peerdup/daemon/start.sh
+peerdup-setup
 ```
 
 On first run prompts for your machine name, registry address, and optional
 relay/LAN settings, writes `config.toml`, then starts the daemon. Subsequent
-runs skip the prompts and go straight to `peerdup-daemon`.
+runs skip the prompts and restart the daemon.
 
-The socket path is auto-detected - no environment variable needed:
-- User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock` (e.g. `/run/user/1000/peerdup/control.sock`)
+TLS to the registry is enabled automatically when a registry address is set.
+Leave the registry address blank if you only need local-only shares.
+
+The socket path is auto-detected:
+- User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock`
 - Root/system installs: `/run/peerdup/control.sock`
 
-Override with `PEERDUP_SOCKET` if you need a non-standard path.
+Override with `PEERDUP_SOCKET` if needed.
 
 ## CLI reference
 
@@ -74,15 +78,17 @@ peerdup share list
 peerdup share info   <name-or-id>          # metadata, no peer roster
 peerdup share peers  <name-or-id>          # peer roster: online/offline
 peerdup share create <name> <path>         # create share, print share_id + fingerprint
-peerdup share create <name> <path> --import-key <file>     # import existing keypair
-peerdup share create <name> <path> --conflict <strategy>   # set conflict strategy at creation
+peerdup share create <name> <path> --local             # local-only, no registry
+peerdup share create <name> <path> --import-key <file> # import existing keypair
+peerdup share create <name> <path> --conflict <strategy>
 peerdup share add    <share_id> <path>     # join an existing share
+peerdup share add    <share_id> <path> --local         # join a local-only share
 peerdup share add    <share_id> <path> --conflict <strategy>
 peerdup share grant  <name-or-id> <peer_id>
 peerdup share revoke <name-or-id> <peer_id>
 peerdup share remove <name-or-id>
 peerdup share set-limit    <name-or-id> --up 10M --down 50M   # 0 = unlimited
-peerdup share set-conflict <name-or-id> <strategy>            # change conflict strategy
+peerdup share set-conflict <name-or-id> <strategy>
 peerdup share conflicts    <name-or-id>                       # list pending conflicts
 peerdup share resolve      <conflict-id> keep-local|keep-remote
 peerdup share pause  <name-or-id>
@@ -91,7 +97,9 @@ peerdup status
 peerdup watch                              # live event stream (includes CONFLICT events)
 ```
 
-### Typical first-time flow
+`peerdup share list` shows a `MODE` column (`registry` or `local`) for each share.
+
+### Registry flow
 
 ```bash
 # Machine A (owner)
@@ -105,11 +113,25 @@ peerdup share add <share_id> ~/Pictures
 peerdup share peers photos   # verify both online
 ```
 
+### Local-only flow (no registry needed)
+
+```bash
+# Machine A
+peerdup share create photos ~/Pictures --local
+# → prints share_id
+
+# Machine B (same LAN)
+peerdup share add <share_id> ~/Pictures --local
+```
+
+Local shares use LAN multicast discovery only. No ACL is enforced - any peer
+on the same LAN that knows the share_id can join.
+
 ### Conflict resolution
 
 When two peers independently modify the same file, peerdup detects the
-divergence (via mismatched libtorrent info-hashes announced to the registry)
-and applies the share's **conflict strategy**:
+divergence (via mismatched libtorrent info-hashes) and applies the share's
+**conflict strategy**:
 
 | Strategy | Behaviour |
 |----------|-----------|
@@ -118,25 +140,14 @@ and applies the share's **conflict strategy**:
 | `ask` | Pause the share and record the conflict in the local DB; resume only after you resolve it manually |
 
 ```bash
-# Set strategy when creating a share
 peerdup share create docs ~/Documents --conflict rename_conflict
-
-# Change strategy on an existing share
 peerdup share set-conflict docs ask
-
-# With ask strategy - view pending conflicts
 peerdup share conflicts docs
-# → shows conflict IDs, remote peer, info-hashes, timestamp
-
-# Resolve: keep your local version (discard remote)
 peerdup share resolve 3 keep-local
-
-# Resolve: accept the remote version (your local content replaced)
 peerdup share resolve 3 keep-remote
 ```
 
-`peerdup watch` emits `[CONFLICT]` events in real time when the `ask`
-strategy detects a divergence, so you can script or alert on them.
+`peerdup watch` emits `[CONFLICT]` events in real time.
 
 ## Component overview
 
@@ -157,24 +168,26 @@ strategy detects a divergence, so you can script or alert on them.
 
 ## Security model
 
-**Identity**: Each peer has an Ed25519 keypair generated on first run.
+**Identity** - each peer has an Ed25519 keypair generated on first run.
 The public key is the `peer_id`. The private key lives at `identity.key_file`
 with 0600 permissions - the daemon refuses to start if it's world-readable.
 
-**Announce signatures**: Every announce is signed over
-`share_id || peer_id || canonical(addrs) || ttl` - covering addresses
-prevents a rogue registry from injecting arbitrary peer addresses.
+**Announce signatures** - every announce is signed over
+`share_id || peer_id || canonical(addrs) || ttl`, preventing a rogue registry
+from injecting arbitrary peer addresses.
 
-**LAN discovery**: UDP multicast packets are signed with the peer's Ed25519
-key and verified before injection into libtorrent. Only peers already in the
-ACL cache are accepted.
+**LAN discovery** - UDP multicast packets are signed with the peer's Ed25519
+key and verified before injection into libtorrent. For registry shares, only
+peers in the ACL cache are accepted.
 
-**Control socket**: The Unix domain socket is created with 0600 permissions,
-accessible only to the daemon's user. No authentication needed - filesystem
-permissions are the access control.
+**Control socket** - the Unix domain socket is created with 0600 permissions,
+accessible only to the daemon's user.
 
-**Transport**: TLS to the registry. libtorrent uses protocol encryption
-between peers (prefer-encrypted; set `out_enc_policy = forced` for mandatory).
+**Transport** - TLS to the registry (enabled automatically when a registry
+address is configured). libtorrent uses protocol encryption between peers.
+
+**Local shares** - no registry ACL. Any peer on the same LAN with the
+share_id can join. Use registry shares for anything sensitive.
 
 ## Deployment (systemd)
 
@@ -188,9 +201,9 @@ sudo pip install -e /path/to/peerdup/daemon
 sudo chown -R peerdup:peerdup /var/lib/peerdup
 
 # Generate config interactively
-sudo -u peerdup /path/to/peerdup/daemon/start.sh
-# ^ writes /path/to/peerdup/daemon/config.toml, then move it:
-sudo mv /path/to/peerdup/daemon/config.toml /etc/peerdup/config.toml
+sudo -u peerdup peerdup-setup
+# config.toml is written next to start.sh; move it:
+sudo mv ~/.local/share/peerdup/daemon/config.toml /etc/peerdup/config.toml
 
 # Install and start service
 sudo cp scripts/peerdup-daemon.service /etc/systemd/system/
@@ -211,8 +224,7 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 | `[daemon]` | `data_dir` | `~/.local/share/peerdup` (user) / `/var/lib/peerdup` (root) | State DB + torrent cache |
 | `[daemon]` | `socket_path` | `$XDG_RUNTIME_DIR/peerdup/control.sock` (user) / `/run/peerdup/control.sock` (root) | CLI control socket |
 | `[daemon]` | `listen_port` | `55000` | libtorrent listen port |
-| `[registry]` | `address` | - | `host:port` of registry |
-| `[registry]` | `tls` | `true` | Enable TLS to registry |
+| `[registry]` | `address` | - | `host:port` of registry; TLS is enabled automatically when set |
 | `[identity]` | `key_file` | `~/.local/share/peerdup/identity.key` (user) / `/var/lib/peerdup/identity.key` (root) | Ed25519 private key |
 | `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec) |
 | `[libtorrent]` | `download_rate_limit` | `0` | Global download cap (bytes/sec) |
