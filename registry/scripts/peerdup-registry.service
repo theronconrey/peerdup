@@ -1,0 +1,23 @@
+[Unit]
+Description=peerdup registry server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peerdup
+Group=peerdup
+WorkingDirectory=/opt/peerdup-registry
+ExecStart=/opt/peerdup-registry/.venv/bin/registry-server --config /etc/peerdup-registry/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/peerdup-registry
+
+[Install]
+WantedBy=multi-user.target

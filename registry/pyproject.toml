@@ -1,0 +1,37 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "peerdup-registry"
+version     = "0.1.0"
+description = "Private peer-to-peer file replication registry"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.11"
+
+dependencies = [
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "protobuf>=4.25",
+    "pynacl>=1.5",
+    "base58>=2.1",
+    "sqlalchemy>=2.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+peerdup-registry = "registry.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]

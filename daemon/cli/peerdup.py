@@ -1,0 +1,490 @@
+"""
+peerdup CLI — talks to the daemon over the control Unix socket.
+
+Usage:
+    peerdup [--socket PATH] <command> [args]
+
+Commands:
+    identity                              Show this peer's identity
+    share list                            List active shares
+    share info <share_id>                 Show metadata for a single share
+    share peers <share_id>                Show peer roster for a share
+    share create <name> <path>            Create a new share (generates share_id)
+    share add <share_id> <path>           Join an existing share
+    share remove <share_id>               Remove a share (optionally --delete-files)
+    share pause <share_id>                Pause syncing a share
+    share resume <share_id>               Resume a paused share
+    share grant <share_id> <peer_id>      Grant a peer access to your share
+    share revoke <share_id> <peer_id>     Revoke a peer's access
+    status                                Show current sync status
+    watch                                 Stream live status events (Ctrl-C to stop)
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+import grpc
+
+
+DEFAULT_SOCKET = "/run/peerdup/control.sock"
+
+
+def _channel(socket_path: str) -> grpc.Channel:
+    return grpc.insecure_channel(f"unix://{socket_path}")
+
+
+def _stub(socket_path: str):
+    import control_pb2_grpc  # type: ignore
+    return control_pb2_grpc.ControlServiceStub(_channel(socket_path))
+
+
+def cmd_identity(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.ShowIdentity(control_pb2.IdentityRequest())
+        print(f"peer_id : {resp.peer_id}")
+        print(f"name    : {resp.name or '(not set)'}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_list(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.ListShares(control_pb2.ListSharesRequest())
+        if not resp.shares:
+            print("No active shares.")
+            return
+        _print_shares(resp.shares)
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_info(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        r = stub.GetShareInfo(control_pb2.GetShareInfoRequest(share_id=args.share_id))
+    except grpc.RpcError as e:
+        _err(e)
+        return
+
+    sid_full  = r.share_id
+    sid_short = sid_full[:16] + ".." if len(sid_full) > 18 else sid_full
+    owner_tag = " (you)" if r.is_owner else ""
+
+    print(f"Share: {r.name}  ({sid_short})")
+    print("─" * 60)
+    print(f"  share_id   : {sid_full}")
+    print(f"  name       : {r.name or '(not set)'}")
+    print(f"  local_path : {r.local_path}")
+    print(f"  state      : {r.state}")
+    print(f"  permission : {r.permission}")
+    print(f"  owner      : {r.owner_id[:16] + '..' if len(r.owner_id) > 18 else r.owner_id}{owner_tag}")
+    if r.created_at:
+        print(f"  created_at : {_format_last_seen(r.created_at)} ({r.created_at[:19]})")
+    print(f"  info_hash  : {r.info_hash or '(none)'}")
+    print(f"  progress   : {_human(r.bytes_done)} / {_human(r.bytes_total)}")
+    print(f"  peers      : {r.peers_online} online / {r.total_peers} total")
+    if r.last_error:
+        print(f"  error      : {r.last_error}")
+    print("─" * 60)
+
+
+def cmd_share_peers(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.ListSharePeers(control_pb2.ListSharePeersRequest(
+            share_id = args.share_id,
+        ))
+    except grpc.RpcError as e:
+        _err(e)
+        return
+
+    sid_short = args.share_id[:16] + ".."
+    print(f"Share: {resp.share_name}  ({sid_short})")
+    print("─" * 72)
+
+    if not resp.peers:
+        print("  No peers found.")
+    else:
+        col = "{:<3} {:<10} {:<12} {:<10} {:<4} {:<20} {}"
+        print(col.format("", "PEER_ID", "NAME", "PERMISSION",
+                         "STAT", "LAST SEEN", "ADDRESSES"))
+        print("  " + "─" * 68)
+        for p in resp.peers:
+            marker   = "▶" if p.is_self else " "
+            pid      = p.peer_id[:8] + ".."
+            status   = "● online" if p.online else "○ offline"
+            last     = _format_last_seen(p.last_seen) if p.last_seen else "—"
+            addrs    = ", ".join(p.addresses) if p.addresses else "—"
+            perm     = p.permission
+            if p.is_owner:
+                perm += " (owner)"
+            print(col.format(marker, pid, p.name[:12], perm,
+                             status[:4], last[:20], addrs))
+            # Show transfer rates if active.
+            if p.online and (p.download_rate or p.upload_rate):
+                print(f"     ↓ {_human(p.download_rate)}/s  "
+                      f"↑ {_human(p.upload_rate)}/s")
+
+    print("─" * 72)
+    print(f"{resp.total_granted} peer(s) with access, "
+          f"{resp.total_online} online")
+
+
+def cmd_share_create(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.CreateShare(control_pb2.CreateShareRequest(
+            name       = args.name,
+            local_path = args.path,
+            permission = args.permission,
+        ))
+        print(f"Share created successfully!")
+        print(f"share_id : {resp.share_id}")
+        print(f"")
+        print(f"Give this share_id to peers, then have them run:")
+        print(f"  peerdup share grant {resp.share_id} <their-peer-id>")
+        print(f"  peerdup share add   {resp.share_id} <their-local-path>")
+        print(f"")
+        _print_shares([resp.share])
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_grant(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.GrantAccess(control_pb2.GrantAccessRequest(
+            share_id   = args.share_id,
+            peer_id    = args.peer_id,
+            permission = args.permission,
+        ))
+        print(f"Access granted:")
+        print(f"  share_id   : {resp.share_id}")
+        print(f"  peer_id    : {resp.peer_id}")
+        print(f"  permission : {resp.permission}")
+        print(f"")
+        print(f"The peer can now join with:")
+        print(f"  peerdup share add {resp.share_id} <their-local-path>")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_revoke(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        stub.RevokeAccess(control_pb2.RevokeAccessRequest(
+            share_id = args.share_id,
+            peer_id  = args.peer_id,
+        ))
+        print(f"Access revoked for peer {args.peer_id} on share {args.share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_add(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.AddShare(control_pb2.AddShareRequest(
+            share_id   = args.share_id,
+            local_path = args.path,
+            permission = args.permission,
+        ))
+        print(f"Added share:")
+        _print_shares([resp.share])
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_remove(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        stub.RemoveShare(control_pb2.RemoveShareRequest(
+            share_id     = args.share_id,
+            delete_files = args.delete_files,
+        ))
+        print(f"Removed share {args.share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_pause(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        stub.PauseShare(control_pb2.PauseShareRequest(share_id=args.share_id))
+        print(f"Paused share {args.share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_resume(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        stub.ResumeShare(control_pb2.ResumeShareRequest(share_id=args.share_id))
+        print(f"Resumed share {args.share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_status(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.Status(control_pb2.StatusRequest())
+        print(resp.message)
+        if resp.HasField("share"):
+            _print_shares([resp.share])
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_watch(args):
+    import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    print("Watching for status events (Ctrl-C to stop)...")
+    try:
+        for event in stub.WatchStatus(control_pb2.StatusRequest()):
+            _print_event(event)
+    except KeyboardInterrupt:
+        pass
+    except grpc.RpcError as e:
+        _err(e)
+
+
+# ── Formatting helpers ────────────────────────────────────────────────────────
+
+def _print_peers(resp):
+    """Pretty-print a ListSharePeersResponse."""
+    sid   = resp.share_id
+    short = sid[:18] + ".." if len(sid) > 20 else sid
+    print(f"Share: {resp.share_name}  ({short})")
+    print("─" * 72)
+
+    if not resp.peers:
+        print("  No peers.")
+    else:
+        col = "{:<10} {:<18} {:<12} {:<11} {:<8} {:<16} {}"
+        print(col.format("", "PEER_ID", "NAME", "PERMISSION",
+                         "STATUS", "LAST SEEN", "ADDRESSES"))
+        print("  " + "─" * 68)
+
+        for p in resp.peers:
+            pid    = p.peer_id[:16] + ".." if len(p.peer_id) > 18 else p.peer_id
+            name   = (p.name or "—")[:12]
+            perm   = p.permission
+            status = "● online" if p.online else "○ offline"
+            seen   = _friendly_time(p.last_seen) if p.last_seen else "never"
+            addrs  = ", ".join(p.addresses) if p.addresses else "—"
+
+            badge = ""
+            if p.is_self:  badge += "[me]"
+            if p.is_owner: badge += "[owner]"
+
+            print(col.format(badge, pid, name, perm, status, seen, addrs))
+
+            if p.download_rate or p.upload_rate:
+                print(f"           ↓ {_human(p.download_rate)}/s  "
+                      f"↑ {_human(p.upload_rate)}/s")
+
+    print("─" * 72)
+    print(f"{resp.total_granted} peer(s) granted access, "
+          f"{resp.total_online} online")
+
+
+def _friendly_time(iso: str) -> str:
+    """Convert ISO-8601 timestamp to a human-friendly relative string."""
+    if not iso:
+        return "never"
+    try:
+        from datetime import datetime, timezone
+        dt  = datetime.fromisoformat(iso)
+        now = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        diff = int((now - dt).total_seconds())
+        if diff < 10:    return "just now"
+        if diff < 60:    return f"{diff}s ago"
+        if diff < 3600:  return f"{diff // 60}m ago"
+        if diff < 86400: return f"{diff // 3600}h ago"
+        return f"{diff // 86400}d ago"
+    except Exception:
+        return iso[:16]
+
+
+def _print_shares(shares):
+    col = "{:<20} {:<12} {:<8} {:>8} {:>8} {:>6}  {}"
+    print(col.format("SHARE_ID", "NAME", "STATE",
+                     "DONE", "TOTAL", "PEERS", "PATH"))
+    print("-" * 80)
+    for s in shares:
+        done  = _human(s.bytes_done)
+        total = _human(s.bytes_total)
+        sid   = s.share_id[:18] + ".." if len(s.share_id) > 20 else s.share_id
+        print(col.format(sid, s.name[:12], s.state,
+                         done, total, s.peers_online, s.local_path))
+        if s.last_error:
+            print(f"  ERROR: {s.last_error}")
+
+
+def _print_event(event):
+    import control_pb2  # type: ignore
+    type_names = {
+        control_pb2.StatusEvent.EVENT_TYPE_SHARE_UPDATED:  "SHARE",
+        control_pb2.StatusEvent.EVENT_TYPE_PEER_EVENT:     "PEER",
+        control_pb2.StatusEvent.EVENT_TYPE_SYNC_PROGRESS:  "PROGRESS",
+        control_pb2.StatusEvent.EVENT_TYPE_ERROR:          "ERROR",
+    }
+    name = type_names.get(event.type, "?")
+    print(f"[{name}] {event.message}")
+
+
+def _format_last_seen(iso: str) -> str:
+    """Convert ISO timestamp to a human-friendly relative string."""
+    if not iso:
+        return "—"
+    try:
+        from datetime import datetime, timezone
+        dt  = datetime.fromisoformat(iso)
+        now = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = int((now - dt).total_seconds())
+        if secs < 10:
+            return "just now"
+        if secs < 60:
+            return f"{secs}s ago"
+        if secs < 3600:
+            return f"{secs // 60}m ago"
+        if secs < 86400:
+            return f"{secs // 3600}h ago"
+        return f"{secs // 86400}d ago"
+    except Exception:
+        return iso[:16]
+
+
+def _human(n: int) -> str:
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024:
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.0f}P"
+
+
+def _err(e: grpc.RpcError):
+    print(f"Error: {e.code().name}: {e.details()}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ── Argument parser ───────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="peerdup",
+        description="peerdup CLI — control the local sync daemon",
+    )
+    p.add_argument("--socket", default=DEFAULT_SOCKET,
+                   help=f"Control socket path (default: {DEFAULT_SOCKET})")
+
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("identity", help="Show peer identity")
+
+    # share subcommands
+    share_p = sub.add_parser("share", help="Manage shares")
+    share_sub = share_p.add_subparsers(dest="share_command", required=True)
+
+    share_sub.add_parser("list", help="List active shares")
+
+    info_p = share_sub.add_parser("info", help="Show metadata for a single share")
+    info_p.add_argument("share_id")
+
+    peers_p = share_sub.add_parser("peers", help="Show peers for a share")
+    peers_p.add_argument("share_id")
+
+    create_p = share_sub.add_parser("create", help="Create a new share")
+    create_p.add_argument("name",  help="Human-readable share name")
+    create_p.add_argument("path",  help="Local directory to sync")
+    create_p.add_argument("--permission", default="rw",
+                          choices=["rw", "ro", "encrypted"],
+                          help="Your own permission level (default: rw)")
+
+    add_p = share_sub.add_parser("add", help="Join an existing share")
+    add_p.add_argument("share_id",   help="Share ID (base58 pubkey from registry)")
+    add_p.add_argument("path",       help="Local directory to sync")
+    add_p.add_argument("--permission", default="rw",
+                       choices=["rw", "ro", "encrypted"])
+
+    rm_p = share_sub.add_parser("remove", help="Remove a share")
+    rm_p.add_argument("share_id")
+    rm_p.add_argument("--delete-files", action="store_true",
+                      help="Also delete local files")
+
+    grant_p = share_sub.add_parser("grant", help="Grant a peer access to your share")
+    grant_p.add_argument("share_id")
+    grant_p.add_argument("peer_id", help="Peer's base58 pubkey (from: peerdup identity)")
+    grant_p.add_argument("--permission", default="rw",
+                         choices=["rw", "ro", "encrypted"])
+
+    revoke_p = share_sub.add_parser("revoke", help="Revoke a peer's access")
+    revoke_p.add_argument("share_id")
+    revoke_p.add_argument("peer_id")
+
+    pause_p = share_sub.add_parser("pause", help="Pause a share")
+    pause_p.add_argument("share_id")
+
+    resume_p = share_sub.add_parser("resume", help="Resume a share")
+    resume_p.add_argument("share_id")
+
+    sub.add_parser("status", help="Show current daemon status")
+    sub.add_parser("watch",  help="Stream live status events")
+
+    return p
+
+
+def main():
+    parser = build_parser()
+    args   = parser.parse_args()
+
+    dispatch = {
+        "identity": cmd_identity,
+        "status":   cmd_status,
+        "watch":    cmd_watch,
+    }
+
+    if args.command in dispatch:
+        dispatch[args.command](args)
+    elif args.command == "share":
+        share_dispatch = {
+            "list":   cmd_share_list,
+            "info":   cmd_share_info,
+            "peers":  cmd_share_peers,
+            "create": cmd_share_create,
+            "add":    cmd_share_add,
+            "remove": cmd_share_remove,
+            "pause":  cmd_share_pause,
+            "resume": cmd_share_resume,
+            "grant":  cmd_share_grant,
+            "revoke": cmd_share_revoke,
+        }
+        share_dispatch[args.share_command](args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

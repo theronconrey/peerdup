@@ -1,0 +1,27 @@
+[Unit]
+Description=peerdup peer daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peerdup
+Group=peerdup
+WorkingDirectory=/opt/peerdup-daemon
+ExecStart=/opt/peerdup-daemon/.venv/bin/peerdup-daemon --config /etc/peerdup/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Runtime directory for the control socket
+RuntimeDirectory=peerdup
+RuntimeDirectoryMode=0750
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/peerdup /run/peerdup
+
+[Install]
+WantedBy=multi-user.target

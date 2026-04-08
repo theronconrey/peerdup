@@ -1,0 +1,50 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "peerdup-daemon"
+version     = "0.1.0"
+description = "peerdup peer daemon — inotify-driven private P2P file sync"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.11"
+
+dependencies = [
+    # gRPC (shared with registry)
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "protobuf>=4.25",
+    # Crypto
+    "pynacl>=1.5",
+    "base58>=2.1",
+    # State DB
+    "sqlalchemy>=2.0",
+    # Filesystem watching
+    "watchdog>=4.0",
+    # Config
+    "tomli>=2.0; python_version < '3.11'",
+    # libtorrent Python bindings
+    # Install via: pip install libtorrent
+    # Or on Fedora: dnf install python3-libtorrent
+    "libtorrent>=2.0; sys_platform != 'unsupported'",
+    # systemd journal logging (optional, Linux only)
+    # "systemd-python>=235",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+peerdup-daemon = "daemon.daemon:main"
+peerdup        = "cli.peerdup:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]

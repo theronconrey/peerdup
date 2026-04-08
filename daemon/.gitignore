@@ -1,0 +1,31 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Generated stubs
+registry_pb2.py
+registry_pb2_grpc.py
+control_pb2.py
+control_pb2_grpc.py
+
+# State
+*.db
+*.db-shm
+*.db-wal
+
+# Identity key — NEVER commit
+*.key
+identity.key
+
+# Torrents cache
+torrents/
+
+# Config (may contain secrets)
+config.toml
+
+.env
+.DS_Store

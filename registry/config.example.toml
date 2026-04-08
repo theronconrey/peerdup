@@ -1,0 +1,19 @@
+# peerdup-registry configuration
+# Copy to config.toml and edit for your deployment.
+
+host         = "0.0.0.0"
+port         = 50051
+database_url = "sqlite:///registry.db"
+log_level    = "INFO"
+max_workers  = 10
+
+[tls]
+# Set enabled = true for any non-loopback deployment.
+# Generate dev certs with: make cert
+enabled   = false
+cert_file = "server.crt"
+key_file  = "server.key"
+
+# Uncomment to require client certificates (mTLS).
+# Generate client certs with: make client-cert
+# ca_file = "server.crt"

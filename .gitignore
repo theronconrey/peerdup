@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Generated proto stubs — regenerate with: make proto
+registry_pb2.py
+registry_pb2_grpc.py
+control_pb2.py
+control_pb2_grpc.py
+
+# Local state
+*.db
+*.db-shm
+*.db-wal
+
+# Identity + TLS keys — NEVER commit
+*.key
+*.crt
+*.csr
+*.srl
+identity.key
+
+# Torrent cache
+torrents/
+
+# Config files (may contain secrets / local paths)
+config.toml
+
+.env
+.DS_Store

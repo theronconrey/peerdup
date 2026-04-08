@@ -1,0 +1,793 @@
+"""
+SyncCoordinator — the brain of the daemon.
+
+Wires together:
+  - FileWatcher   → detects local changes
+  - RegistryClient → announces presence, watches peer state
+  - LibtorrentSession → manages actual transfers
+  - StateDB        → persists share/file/peer state across restarts
+
+One coordinator instance per daemon. All async.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import os
+import socket
+from pathlib import Path
+from typing import Callable
+
+import base58
+from nacl.signing import SigningKey
+
+from daemon.identity import Identity
+from daemon.registry.client import RegistryClient, watch_share_peers_loop
+from daemon.state.db import ShareState, StateDB
+from daemon.torrent.session import LibtorrentSession, TorrentStatus
+from daemon.watcher.fs import FileChangedEvent, FileWatcher
+
+log = logging.getLogger(__name__)
+
+# How often to re-announce even without a file change.
+ANNOUNCE_INTERVAL_SECONDS = 120
+# TTL sent to registry; re-announce before this expires.
+ANNOUNCE_TTL_SECONDS      = 300
+
+
+class SyncCoordinator:
+
+    def __init__(self,
+                 identity:    Identity,
+                 state_db:    StateDB,
+                 registry:    RegistryClient,
+                 lt_session:  LibtorrentSession,
+                 peer_name:   str = "",
+                 listen_port: int = 55000,
+                 data_dir:    str = "/var/lib/peerdup"):
+        self._identity    = identity
+        self._db          = state_db
+        self._registry    = registry
+        self._lt          = lt_session
+        self._peer_name   = peer_name
+        self._listen_port = listen_port
+        self._data_dir    = data_dir
+
+        # asyncio plumbing
+        self._fs_event_queue: asyncio.Queue[FileChangedEvent] = asyncio.Queue()
+        self._status_queue:   asyncio.Queue[TorrentStatus]    = asyncio.Queue()
+        self._stop_event      = asyncio.Event()
+
+        # share_id -> asyncio.Event (stop watcher task)
+        self._watch_stop:  dict[str, asyncio.Event] = {}
+        # share_id -> asyncio.Task
+        self._watch_tasks: dict[str, asyncio.Task]  = {}
+        # share_id -> asyncio.Task (announce heartbeat)
+        self._announce_tasks: dict[str, asyncio.Task] = {}
+
+        # Control event bus for the ControlService to subscribe to.
+        self._control_subscribers: list[asyncio.Queue] = []
+
+        self._file_watcher: FileWatcher | None = None
+        self._lan = None   # LanDiscovery, set in start() if enabled
+
+    # ── Startup ───────────────────────────────────────────────────────────────
+
+    async def start(self, loop: asyncio.AbstractEventLoop, lan_config=None):
+        """Boot the coordinator. Call once after registry.connect()."""
+
+        # Bridge watchdog thread → asyncio queue.
+        bridge = FileWatcher.make_async_bridge(loop, self._fs_event_queue)
+        self._file_watcher = FileWatcher(on_change=bridge)
+        self._file_watcher.start()
+
+        # Bridge libtorrent status alerts → asyncio queue.
+        def _lt_bridge(status: TorrentStatus):
+            loop.call_soon_threadsafe(self._status_queue.put_nowait, status)
+
+        self._lt._on_status = _lt_bridge
+        self._lt.start()
+
+        # Register with registry.
+        sig = self._identity.sign_register(self._identity_name)
+        self._registry.register_peer(
+            self._identity.peer_id,
+            self._identity_name,
+            sig,
+        )
+
+        # Resume all persisted shares.
+        for share in self._db.list_shares():
+            if share.state != ShareState.PAUSED:
+                await self._activate_share(share.share_id, share.local_path)
+
+        # Start background tasks.
+        asyncio.create_task(self._fs_event_loop())
+        asyncio.create_task(self._status_update_loop())
+
+        # LAN multicast discovery (optional).
+        if lan_config and lan_config.enabled:
+            from daemon.lan.discovery import LanDiscovery
+            self._lan = LanDiscovery(
+                identity      = self._identity,
+                config        = lan_config,
+                get_share_ids = self._get_active_share_ids,
+                on_peer_seen  = self._on_lan_peer,
+                listen_port   = self._listen_port,
+            )
+            await self._lan.start()
+
+        log.info("SyncCoordinator started peer_id=%s", self._identity.peer_id)
+
+    @property
+    def _identity_name(self) -> str:
+        """Human-readable name sent to the registry on registration."""
+        return self._peer_name or self._identity.peer_id[:8]
+
+    async def stop(self):
+        self._stop_event.set()
+        for stop_ev in self._watch_stop.values():
+            stop_ev.set()
+        for task in list(self._watch_tasks.values()) + list(self._announce_tasks.values()):
+            task.cancel()
+        if self._file_watcher:
+            self._file_watcher.stop()
+        if self._lan:
+            await self._lan.stop()
+        self._lt.stop()
+        log.info("SyncCoordinator stopped")
+
+    # ── Runtime share management (called by ControlService) ──────────────────
+
+    async def create_share(self, name: str, local_path: str,
+                           permission: str = "rw") -> dict:
+        """
+        Create a brand-new share:
+          1. Generate a fresh Ed25519 keypair — public key becomes share_id
+          2. Call registry.CreateShare (signed with peer identity key)
+          3. Persist share keypair locally
+          4. Activate the share (watch, torrent, announce)
+        Returns a status dict with share_id included.
+        """
+        # 1. Generate share keypair.
+        share_sk  = SigningKey.generate()
+        share_id  = base58.b58encode(bytes(share_sk.verify_key)).decode()
+        share_seed = bytes(share_sk)
+
+        # 2. Sign CreateShare with peer identity key and call registry.
+        sig = self._identity.sign_create_share(share_id, name)
+        try:
+            self._registry.create_share(share_id, name, sig)
+        except Exception as e:
+            raise RuntimeError(f"Registry CreateShare failed: {e}") from e
+
+        # 3. Persist share keypair locally (owner only).
+        self._db.save_share_keypair(share_id, share_seed)
+        self._db.add_share(share_id, name, local_path, permission,
+                           is_owner=True)
+
+        # 4. Activate.
+        await self._activate_share(share_id, local_path)
+
+        status = self._lt.get_status(share_id)
+        result = self._build_share_status(share_id, name, local_path,
+                                          "syncing", status)
+        result["share_id"] = share_id   # ensure it's in the response
+        log.info("Created share share_id=%s name=%s", share_id, name)
+        return result
+
+    async def grant_access(self, share_id: str, peer_id: str,
+                           permission: str = "rw") -> dict:
+        """
+        Grant a peer access to a share.
+        Caller must be the share owner.
+        """
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found locally — "
+                           "you must be a member to grant access")
+        if not share.is_owner:
+            raise PermissionError(
+                f"You are not the owner of share {share_id}"
+            )
+
+        # Map permission string to registry proto value.
+        perm_map = {
+            "rw":        "PERMISSION_READ_WRITE",
+            "ro":        "PERMISSION_READ_ONLY",
+            "encrypted": "PERMISSION_ENCRYPTED",
+        }
+        if permission not in perm_map:
+            raise ValueError(f"Invalid permission '{permission}'. "
+                             "Use: rw, ro, encrypted")
+
+        try:
+            self._registry.add_peer_to_share(share_id, peer_id,
+                                             perm_map[permission])
+        except Exception as e:
+            raise RuntimeError(f"Registry AddPeerToShare failed: {e}") from e
+
+        log.info("Granted access share=%s peer=%s permission=%s",
+                 share_id, peer_id[:8], permission)
+        return {
+            "share_id":   share_id,
+            "peer_id":    peer_id,
+            "permission": permission,
+        }
+
+    async def revoke_access(self, share_id: str, peer_id: str):
+        """Revoke a peer's access to a share. Caller must be owner."""
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found locally")
+        if not share.is_owner:
+            raise PermissionError(f"You are not the owner of share {share_id}")
+
+        try:
+            self._registry.remove_peer_from_share(share_id, peer_id)
+        except Exception as e:
+            raise RuntimeError(f"Registry RemovePeerFromShare failed: {e}") from e
+
+        log.info("Revoked access share=%s peer=%s", share_id, peer_id[:8])
+
+    async def add_share(self, share_id: str, local_path: str,
+                        permission: str = "rw") -> dict:
+        """
+        Add a share at runtime. Fetches metadata from registry, persists
+        locally, starts watching and announces.
+        Returns a status dict suitable for the ControlService response.
+        """
+        # Fetch share name from registry.
+        try:
+            share_proto = self._registry.get_share(share_id)
+            name = share_proto.name
+        except Exception as e:
+            log.warning("Could not fetch share from registry: %s", e)
+            name = share_id[:8]
+
+        # Persist to local state.
+        self._db.add_share(share_id, name, local_path, permission)
+
+        # Activate.
+        await self._activate_share(share_id, local_path)
+
+        status = self._lt.get_status(share_id)
+        return self._build_share_status(share_id, name, local_path,
+                                        "syncing", status)
+
+    async def remove_share(self, share_id: str, delete_files: bool = False):
+        """Remove a share at runtime."""
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found")
+
+        # Stop watcher stream.
+        stop_ev = self._watch_stop.pop(share_id, None)
+        if stop_ev:
+            stop_ev.set()
+
+        task = self._watch_tasks.pop(share_id, None)
+        if task:
+            task.cancel()
+
+        atask = self._announce_tasks.pop(share_id, None)
+        if atask:
+            atask.cancel()
+
+        # Stop watching filesystem.
+        if self._file_watcher:
+            self._file_watcher.remove_share(share_id)
+
+        # Remove libtorrent torrent.
+        self._lt.remove_share(share_id, delete_files=delete_files)
+
+        # Remove from state db.
+        self._db.remove_share(share_id)
+
+        log.info("Removed share %s delete_files=%s", share_id, delete_files)
+
+    async def pause_share(self, share_id: str):
+        self._db.set_share_state(share_id, ShareState.PAUSED)
+        if self._file_watcher:
+            self._file_watcher.remove_share(share_id)
+        stop_ev = self._watch_stop.get(share_id)
+        if stop_ev:
+            stop_ev.set()
+
+    async def resume_share(self, share_id: str):
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found")
+        self._db.set_share_state(share_id, ShareState.SYNCING)
+        await self._activate_share(share_id, share.local_path)
+
+    def list_share_peers(self, share_id: str) -> dict:
+        """
+        Return full peer roster for a share, merging three sources:
+          1. Registry  — authoritative ACL (who has access, permission, name)
+          2. known_peers table — online status + last-seen addresses
+          3. libtorrent — active transfer rates for connected peers
+        """
+        # Source 1: registry ACL (requires membership).
+        try:
+            share_proto  = self._registry.get_share(share_id)
+            share_name   = share_proto.name
+            registry_peers = {
+                sp.peer_id: sp for sp in share_proto.peers
+            }
+        except Exception as e:
+            log.warning("Could not fetch share from registry: %s", e)
+            share_name     = share_id[:8]
+            registry_peers = {}
+
+        # Source 2: local known_peers (online status + addresses).
+        known = {
+            kp.peer_id: kp
+            for kp in self._db.get_online_peers(share_id)
+        }
+        # Also get ALL known peers (online or not) for last_seen.
+        all_known = {kp.peer_id: kp for kp in self._db.list_all_known_peers(share_id)}
+
+        # Source 3: libtorrent active connections.
+        lt_status = self._lt.get_status(share_id)
+        lt_peers: dict[str, dict] = {}
+        if lt_status:
+            # libtorrent doesn't give per-peer rates via get_status —
+            # those come from handle.get_peer_info(). We include
+            # aggregate rates here; per-peer rates are a future enhancement.
+            pass
+
+        # Build the merged peer list.
+        # Union of registry ACL and any locally-known peers.
+        all_peer_ids = set(registry_peers.keys()) | set(all_known.keys())
+
+        peers = []
+        local_share = self._db.get_share(share_id)
+
+        for pid in all_peer_ids:
+            reg_peer  = registry_peers.get(pid)
+            loc_peer  = all_known.get(pid)
+            is_self   = (pid == self._identity.peer_id)
+            is_online = (pid in known)
+
+            # Permission: prefer registry (authoritative), fall back to local.
+            permission = "unknown"
+            if reg_peer:
+                perm_val = reg_peer.permission
+                # Convert proto enum int to string.
+                perm_map = {1: "rw", 2: "ro", 3: "encrypted"}
+                permission = perm_map.get(perm_val, "unknown")
+
+            # Name: from registry SharePeer.
+            name = reg_peer.name if reg_peer else pid[:8]
+
+            # Addresses: from known_peers if online.
+            addresses = []
+            if loc_peer and is_online:
+                import json as _json
+                try:
+                    raw = _json.loads(loc_peer.addresses)
+                    addresses = [f"{a['host']}:{a['port']}" for a in raw]
+                except Exception:
+                    pass
+
+            # last_seen timestamp.
+            last_seen = ""
+            if loc_peer and loc_peer.last_seen:
+                last_seen = loc_peer.last_seen.isoformat()
+
+            # is_owner: local flag if this daemon created the share.
+            is_owner = bool(
+                local_share and local_share.is_owner
+                and is_self
+            )
+
+            peers.append({
+                "peer_id":       pid,
+                "name":          name,
+                "permission":    permission,
+                "online":        is_online,
+                "is_self":       is_self,
+                "is_owner":      is_owner,
+                "last_seen":     last_seen,
+                "addresses":     addresses,
+                "download_rate": 0,
+                "upload_rate":   0,
+            })
+
+        # Sort: self first, then online peers, then offline.
+        peers.sort(key=lambda p: (
+            not p["is_self"],
+            not p["online"],
+            p["name"].lower(),
+        ))
+
+        total_online = sum(1 for p in peers if p["online"])
+
+        return {
+            "share_id":      share_id,
+            "share_name":    share_name,
+            "peers":         peers,
+            "total_granted": len(peers),
+            "total_online":  total_online,
+        }
+
+    def get_share_info(self, share_id: str) -> dict:
+        """
+        Return metadata for a single share — no peer roster.
+        Merges local DB state + libtorrent status + registry metadata.
+        """
+        local_share = self._db.get_share(share_id)
+        if not local_share:
+            raise KeyError(f"Share {share_id} not found")
+
+        lt_status = self._lt.get_status(share_id)
+
+        # Registry metadata (best-effort).
+        owner_id   = ""
+        created_at = ""
+        total_peers = 0
+        try:
+            share_proto = self._registry.get_share(share_id)
+            owner_id    = share_proto.owner_id
+            total_peers = len(share_proto.peers)
+            ts = share_proto.created_at
+            if ts.seconds:
+                from datetime import datetime, timezone
+                created_at = datetime.fromtimestamp(
+                    ts.seconds + ts.nanos / 1e9, tz=timezone.utc
+                ).isoformat()
+        except Exception:
+            pass
+
+        peers_online = len(self._db.get_online_peers(share_id))
+
+        return {
+            "share_id":     share_id,
+            "name":         local_share.name,
+            "local_path":   local_share.local_path,
+            "state":        local_share.state.value,
+            "permission":   local_share.permission,
+            "is_owner":     bool(local_share.is_owner),
+            "owner_id":     owner_id,
+            "created_at":   created_at,
+            "bytes_total":  lt_status.bytes_total if lt_status else 0,
+            "bytes_done":   lt_status.bytes_done  if lt_status else 0,
+            "info_hash":    lt_status.info_hash    if lt_status else "",
+            "peers_online": peers_online,
+            "total_peers":  total_peers,
+            "last_error":   local_share.last_error or "",
+        }
+
+    def list_shares(self) -> list[dict]:
+        shares = self._db.list_shares()
+        result = []
+        for share in shares:
+            lt_status = self._lt.get_status(share.share_id)
+            result.append(self._build_share_status(
+                share.share_id, share.name, share.local_path,
+                share.state.value, lt_status,
+                last_error=share.last_error,
+            ))
+        return result
+
+    # ── Announce loop ─────────────────────────────────────────────────────────
+
+    async def _announce_loop(self, share_id: str):
+        """Heartbeat: re-announce every ANNOUNCE_INTERVAL_SECONDS."""
+        while not self._stop_event.is_set():
+            try:
+                await self._announce(share_id)
+            except Exception:
+                log.exception("Announce failed share=%s", share_id)
+            await asyncio.sleep(ANNOUNCE_INTERVAL_SECONDS)
+
+    async def _announce(self, share_id: str):
+        addrs = self._local_addrs()
+        sig   = self._identity.sign_announce(share_id, addrs, ANNOUNCE_TTL_SECONDS)
+        # Include our current info_hash so joining peers can do magnet-style adds.
+        local_share = self._db.get_share(share_id)
+        ih = local_share.info_hash if local_share else ""
+        ext_host, ext_port, ttl = self._registry.announce(
+            share_id       = share_id,
+            peer_id        = self._identity.peer_id,
+            internal_addrs = addrs,
+            ttl_seconds    = ANNOUNCE_TTL_SECONDS,
+            signature      = sig,
+            info_hash      = ih or "",
+        )
+        log.debug("Announced share=%s ext=%s:%s ttl=%ds info_hash=%s",
+                  share_id, ext_host, ext_port, ttl, ih)
+
+    def _local_addrs(self) -> list[dict]:
+        """Return this host's LAN addresses on the listen port."""
+        addrs = []
+        try:
+            hostname = socket.gethostname()
+            for info in socket.getaddrinfo(hostname, self._listen_port,
+                                           socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127."):
+                    addrs.append({"host": ip, "port": self._listen_port,
+                                  "is_lan": True})
+        except Exception:
+            pass
+        # Fallback
+        if not addrs:
+            addrs.append({"host": "0.0.0.0", "port": self._listen_port,
+                          "is_lan": True})
+        return addrs
+
+    def _make_peer_event_handler(self, share_id: str):
+        """Return a per-share event handler closure."""
+        import registry_pb2 as pb  # type: ignore
+
+        async def _handler(event):
+            peer_id = event.peer.peer_id
+
+            if peer_id == self._identity.peer_id:
+                return
+
+            addrs = [
+                {"host": a.host, "port": a.port, "is_lan": a.is_lan}
+                for a in event.peer.addresses
+            ]
+
+            if event.type in (pb.PeerEvent.EVENT_TYPE_ONLINE,
+                               pb.PeerEvent.EVENT_TYPE_UPDATED):
+                log.info("Peer online share=%s peer=%s addrs=%s",
+                         share_id, peer_id[:8], addrs)
+                self._db.upsert_peer(share_id, peer_id, addrs, online=True)
+                # Inject addresses into libtorrent.
+                for addr in addrs:
+                    self._lt.add_peer(share_id, addr["host"], addr["port"])
+
+            elif event.type in (pb.PeerEvent.EVENT_TYPE_OFFLINE,
+                                 pb.PeerEvent.EVENT_TYPE_REMOVED):
+                log.info("Peer offline share=%s peer=%s", share_id, peer_id[:8])
+                self._db.upsert_peer(share_id, peer_id, addrs, online=False)
+
+            await self._publish_control_event({
+                "type":    "peer_event",
+                "share_id": share_id,
+                "peer_id":  peer_id,
+                "online":   event.type == pb.PeerEvent.EVENT_TYPE_ONLINE,
+            })
+
+        return _handler
+
+    # ── Internal activation ──────────────────────────────────────────────────
+
+    async def _activate_share(self, share_id: str, local_path: str):
+        """Set up watcher, libtorrent, announce, and start watch stream."""
+
+        if self._file_watcher:
+            self._file_watcher.add_share(share_id, local_path)
+
+        has_files = any(
+            True for f in Path(local_path).rglob("*")
+            if Path(f).is_file()
+        ) if Path(local_path).exists() else False
+
+        torrent_path = os.path.join(
+            self._data_dir, "torrents", f"{share_id}.torrent"
+        )
+
+        # If we have no files and no saved torrent, try to bootstrap from an
+        # online peer's announced info_hash (magnet-style / BEP 9 ut_metadata).
+        peer_info_hash: str | None = None
+        if not has_files and not os.path.exists(torrent_path):
+            try:
+                peers = self._registry.get_share_peers(share_id, online_only=True)
+                for sp in peers:
+                    if sp.info_hash and sp.peer_id != self._identity.peer_id:
+                        peer_info_hash = sp.info_hash
+                        break
+            except Exception:
+                pass
+
+        try:
+            ih = self._lt.add_share(
+                share_id, local_path,
+                torrent_path=torrent_path,
+                seed_mode=has_files,
+                info_hash=peer_info_hash,
+            )
+            self._db.set_share_state(share_id,
+                                     ShareState.SEEDING if has_files
+                                     else ShareState.SYNCING,
+                                     info_hash=ih)
+        except Exception as e:
+            log.exception("Failed to add torrent for share %s", share_id)
+            self._db.set_share_state(share_id, ShareState.ERROR, error=str(e))
+            return
+
+        for kp in self._db.get_online_peers(share_id):
+            try:
+                for addr in json.loads(kp.addresses):
+                    self._lt.add_peer(share_id, addr["host"], addr["port"])
+            except Exception:
+                pass
+
+        # Announce immediately so peers discover our info_hash without waiting
+        # for the background loop's first iteration.
+        try:
+            await self._announce(share_id)
+        except Exception:
+            log.warning("Initial announce failed for share=%s (will retry in loop)",
+                        share_id)
+
+        if share_id not in self._announce_tasks:
+            self._announce_tasks[share_id] = asyncio.create_task(
+                self._announce_loop(share_id)
+            )
+
+        if share_id not in self._watch_tasks:
+            stop_ev = asyncio.Event()
+            self._watch_stop[share_id] = stop_ev
+            handler = self._make_peer_event_handler(share_id)
+            self._watch_tasks[share_id] = asyncio.create_task(
+                watch_share_peers_loop(
+                    self._registry, share_id, handler, stop_ev,
+                )
+            )
+
+    # ── File event loop ───────────────────────────────────────────────────────
+
+    async def _fs_event_loop(self):
+        """Process file change events from the FileWatcher."""
+        while not self._stop_event.is_set():
+            try:
+                evt: FileChangedEvent = await asyncio.wait_for(
+                    self._fs_event_queue.get(), timeout=1.0
+                )
+                await self._handle_fs_event(evt)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("Error processing fs event")
+
+    async def _handle_fs_event(self, evt: FileChangedEvent):
+        log.debug("FS event share=%s type=%s path=%s",
+                  evt.share_id, evt.change_type, evt.rel_path)
+
+        share = self._db.get_share(evt.share_id)
+        if not share or share.state == ShareState.PAUSED:
+            return
+
+        # Update file index.
+        local_path = Path(share.local_path) / evt.rel_path
+        if evt.change_type == "deleted":
+            self._db.delete_file(evt.share_id, evt.rel_path)
+        else:
+            try:
+                st = local_path.stat()
+                self._db.upsert_file(
+                    evt.share_id, evt.rel_path,
+                    size=st.st_size, mtime_ns=st.st_mtime_ns
+                )
+            except FileNotFoundError:
+                return
+
+        # Rebuild torrent and re-announce.
+        torrent_path = os.path.join(
+            self._data_dir, "torrents", f"{evt.share_id}.torrent"
+        )
+        try:
+            # Remove old handle and re-add with fresh metadata.
+            self._lt.remove_share(evt.share_id, delete_files=False)
+            ih = self._lt.add_share(
+                evt.share_id, share.local_path,
+                torrent_path=torrent_path,
+                seed_mode=True,
+            )
+            self._db.set_share_state(evt.share_id, ShareState.SEEDING,
+                                     info_hash=ih)
+
+            # Re-inject known peers.
+            for kp in self._db.get_online_peers(evt.share_id):
+                for addr in json.loads(kp.addresses):
+                    self._lt.add_peer(evt.share_id, addr["host"], addr["port"])
+
+            # Announce immediately.
+            await self._announce(evt.share_id)
+
+        except Exception:
+            log.exception("Failed to update torrent after fs event share=%s",
+                          evt.share_id)
+
+    # ── Status update loop ────────────────────────────────────────────────────
+
+    async def _status_update_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                status: TorrentStatus = await asyncio.wait_for(
+                    self._status_queue.get(), timeout=1.0
+                )
+                await self._publish_control_event({
+                    "type":    "sync_progress",
+                    "share_id": status.share_id,
+                    "progress": status.progress,
+                    "bytes_done":  status.bytes_done,
+                    "bytes_total": status.bytes_total,
+                    "peers":       status.peers,
+                })
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+    # ── Control event bus ─────────────────────────────────────────────────────
+
+    def subscribe_control(self, queue: asyncio.Queue):
+        self._control_subscribers.append(queue)
+
+    def unsubscribe_control(self, queue: asyncio.Queue):
+        try:
+            self._control_subscribers.remove(queue)
+        except ValueError:
+            pass
+
+    async def _publish_control_event(self, event: dict):
+        for q in list(self._control_subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    # ── LAN discovery ─────────────────────────────────────────────────────────
+
+    def _get_active_share_ids(self) -> list[str]:
+        """Return share_ids for all non-paused local shares."""
+        return [s.share_id for s in self._db.list_shares()
+                if s.state != ShareState.PAUSED]
+
+    async def _on_lan_peer(self, peer_id: str, share_ids: list[str],
+                           host: str, port: int):
+        """
+        Called by LanDiscovery for each verified remote announcement.
+
+        ACL check: only inject peers that appear in the known_peers cache
+        for shares we actively participate in.  This guards against arbitrary
+        peers being injected before registry membership is confirmed.
+        """
+        for share_id in share_ids:
+            local_share = self._db.get_share(share_id)
+            if not local_share:
+                continue
+            known = {kp.peer_id
+                     for kp in self._db.list_all_known_peers(share_id)}
+            if peer_id not in known:
+                log.debug("LAN peer %s not in ACL cache for share %s — skip",
+                          peer_id[:8], share_id[:8])
+                continue
+            log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
+                     share_id[:8], peer_id[:8], host, port)
+            self._lt.add_peer(share_id, host, port)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _build_share_status(self, share_id: str, name: str, local_path: str,
+                            state: str, lt_status: TorrentStatus | None,
+                            last_error: str | None = None) -> dict:
+        peers_online = len(self._db.get_online_peers(share_id))
+        return {
+            "share_id":    share_id,
+            "name":        name,
+            "local_path":  local_path,
+            "state":       state,
+            "bytes_total": lt_status.bytes_total if lt_status else 0,
+            "bytes_done":  lt_status.bytes_done  if lt_status else 0,
+            "peers_online": peers_online,
+            "last_error":  last_error or "",
+            "info_hash":   lt_status.info_hash   if lt_status else "",
+        }
+
+    @property
+    def peer_id(self) -> str:
+        return self._identity.peer_id

@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Generated proto stubs (regenerate with: make proto)
+registry_pb2.py
+registry_pb2_grpc.py
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# TLS certs (never commit private keys)
+*.key
+*.crt
+*.csr
+*.srl
+
+# Config (may contain secrets)
+config.toml
+
+# Misc
+.env
+.DS_Store

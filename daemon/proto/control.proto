@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package control.v1;
+
+// ── Share status ──────────────────────────────────────────────────────────────
+
+message ShareStatus {
+  string share_id     = 1;  // base58 Ed25519 pubkey
+  string name         = 2;
+  string local_path   = 3;
+  string state        = 4;  // "syncing" | "seeding" | "paused" | "error"
+  uint64 bytes_total  = 5;
+  uint64 bytes_done   = 6;
+  int32  peers_online = 7;
+  string last_error   = 8;
+  string info_hash    = 9;  // current libtorrent info-hash (hex)
+}
+
+// ── Share management ──────────────────────────────────────────────────────────
+
+message AddShareRequest {
+  string share_id    = 1;  // must already exist in the registry
+  string local_path  = 2;  // absolute path to sync directory (created if absent)
+  string permission  = 3;  // "rw" | "ro" | "encrypted"
+}
+
+message AddShareResponse {
+  ShareStatus share = 1;
+}
+
+message RemoveShareRequest {
+  string share_id    = 1;
+  bool   delete_files = 2;  // if true, rm -rf local_path after removing share
+}
+
+message RemoveShareResponse {}
+
+message ListSharesRequest {}
+
+message ListSharesResponse {
+  repeated ShareStatus shares = 1;
+}
+
+// ── Identity ──────────────────────────────────────────────────────────────────
+
+message IdentityRequest {}
+
+message IdentityResponse {
+  string peer_id = 1;  // base58 Ed25519 pubkey
+  string name    = 2;
+}
+
+// ── Daemon status / streaming ─────────────────────────────────────────────────
+
+message StatusRequest {}
+
+message StatusEvent {
+  enum EventType {
+    EVENT_TYPE_UNSPECIFIED  = 0;
+    EVENT_TYPE_SHARE_UPDATED = 1;  // share state changed
+    EVENT_TYPE_PEER_EVENT   = 2;  // peer came online / went offline
+    EVENT_TYPE_SYNC_PROGRESS = 3; // bytes_done updated
+    EVENT_TYPE_ERROR        = 4;  // non-fatal error
+  }
+  EventType   type    = 1;
+  ShareStatus share   = 2;  // populated for SHARE_UPDATED / SYNC_PROGRESS
+  string      message = 3;  // human-readable detail
+}
+
+// ── Create share ─────────────────────────────────────────────────────────────
+
+message CreateShareRequest {
+  string name        = 1;  // human-readable label
+  string local_path  = 2;  // absolute path to sync directory (created if absent)
+  string permission  = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
+}
+
+message CreateShareResponse {
+  ShareStatus share    = 1;
+  string      share_id = 2;  // base58 pubkey — hand this to peers
+}
+
+// ── Grant access ──────────────────────────────────────────────────────────────
+
+message GrantAccessRequest {
+  string share_id   = 1;  // share to grant access to
+  string peer_id    = 2;  // recipient's base58 pubkey (from: peerdup identity)
+  string permission = 3;  // "rw" | "ro" | "encrypted" (default "rw")
+}
+
+message GrantAccessResponse {
+  string share_id   = 1;
+  string peer_id    = 2;
+  string permission = 3;
+}
+
+// ── Revoke access ─────────────────────────────────────────────────────────────
+
+message RevokeAccessRequest {
+  string share_id = 1;
+  string peer_id  = 2;
+}
+
+message RevokeAccessResponse {}
+
+// ── Peer roster ──────────────────────────────────────────────────────────────
+
+message SharePeerInfo {
+  string peer_id      = 1;  // base58 Ed25519 pubkey
+  string name         = 2;  // human-readable name (from registry)
+  string permission   = 3;  // "rw" | "ro" | "encrypted"
+  bool   online       = 4;  // true if TTL-live announcement exists
+  bool   is_self      = 5;  // true if this is the local peer
+  bool   is_owner     = 6;  // true if this peer created the share
+  string last_seen    = 7;  // ISO-8601 timestamp or "" if never seen
+  repeated string addresses = 8;  // "host:port" strings, empty if offline
+  // libtorrent active connection stats (populated if online + active transfer)
+  int32  download_rate = 9;   // bytes/sec
+  int32  upload_rate   = 10;  // bytes/sec
+}
+
+message ListSharePeersRequest {
+  string share_id = 1;
+}
+
+message ListSharePeersResponse {
+  string                   share_id      = 1;
+  string                   share_name    = 2;
+  repeated SharePeerInfo   peers         = 3;
+  int32                    total_granted = 4;  // total peers with ACL entry
+  int32                    total_online  = 5;  // peers currently announcing
+}
+
+// ── Share info ────────────────────────────────────────────────────────────────
+
+message GetShareInfoRequest {
+  string share_id = 1;
+}
+
+message GetShareInfoResponse {
+  string share_id     = 1;
+  string name         = 2;
+  string local_path   = 3;
+  string state        = 4;   // "syncing" | "seeding" | "paused" | "error"
+  string permission   = 5;   // this peer's own permission level
+  bool   is_owner     = 6;
+  string owner_id     = 7;   // peer_id of share creator (from registry)
+  string created_at   = 8;   // ISO-8601 timestamp (from registry)
+  uint64 bytes_total  = 9;
+  uint64 bytes_done   = 10;
+  string info_hash    = 11;  // libtorrent info-hash (hex)
+  int32  peers_online = 12;  // peers currently announcing
+  int32  total_peers  = 13;  // total peers with ACL access
+  string last_error   = 14;
+}
+
+// ── Pause / resume ────────────────────────────────────────────────────────────
+
+message PauseShareRequest  { string share_id = 1; }
+message PauseShareResponse {}
+
+message ResumeShareRequest  { string share_id = 1; }
+message ResumeShareResponse {}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service ControlService {
+  // Share lifecycle
+  rpc CreateShare   (CreateShareRequest)  returns (CreateShareResponse);
+  rpc AddShare      (AddShareRequest)     returns (AddShareResponse);
+  rpc RemoveShare   (RemoveShareRequest)  returns (RemoveShareResponse);
+  rpc ListShares    (ListSharesRequest)   returns (ListSharesResponse);
+  rpc PauseShare    (PauseShareRequest)   returns (PauseShareResponse);
+  rpc ResumeShare   (ResumeShareRequest)  returns (ResumeShareResponse);
+
+  // Share info
+  rpc GetShareInfo  (GetShareInfoRequest)   returns (GetShareInfoResponse);
+
+  // Peer roster
+  rpc ListSharePeers (ListSharePeersRequest) returns (ListSharePeersResponse);
+
+  // Access control
+  rpc GrantAccess   (GrantAccessRequest)  returns (GrantAccessResponse);
+  rpc RevokeAccess  (RevokeAccessRequest) returns (RevokeAccessResponse);
+
+  // Identity
+  rpc ShowIdentity  (IdentityRequest)     returns (IdentityResponse);
+
+  // Status
+  rpc Status        (StatusRequest)       returns (StatusEvent);
+  rpc WatchStatus   (StatusRequest)       returns (stream StatusEvent);
+}

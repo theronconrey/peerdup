@@ -1,0 +1,191 @@
+syntax = "proto3";
+
+package registry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ── Common types ──────────────────────────────────────────────────────────────
+
+message PeerAddress {
+  string host   = 1;
+  uint32 port   = 2;
+  bool   is_lan = 3;
+}
+
+enum Permission {
+  PERMISSION_UNSPECIFIED = 0;
+  PERMISSION_READ_WRITE  = 1;  // full read/write access
+  PERMISSION_READ_ONLY   = 2;  // read-only access
+  PERMISSION_ENCRYPTED   = 3;  // stores ciphertext only, cannot read plaintext
+}
+
+message Peer {
+  string                    peer_id   = 1;  // Ed25519 pubkey, base58-encoded
+  string                    name      = 2;
+  repeated PeerAddress      addresses = 3;
+  bool                      online    = 4;
+  google.protobuf.Timestamp last_seen = 5;
+}
+
+message SharePeer {
+  string                    peer_id    = 1;  // Ed25519 pubkey, base58-encoded
+  string                    name       = 2;
+  Permission                permission = 3;
+  bool                      online     = 4;
+  repeated PeerAddress      addresses  = 5;
+  google.protobuf.Timestamp last_seen  = 6;
+  string                    info_hash  = 7;  // hex info-hash of the share torrent
+}
+
+message Share {
+  string                    share_id   = 1;  // Ed25519 pubkey, base58-encoded
+  string                    name       = 2;
+  string                    owner_id   = 3;  // peer_id of creator
+  repeated SharePeer        peers      = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// ── Peer identity ─────────────────────────────────────────────────────────────
+
+message RegisterPeerRequest {
+  string peer_id   = 1;  // Ed25519 pubkey, base58-encoded
+  string name      = 2;
+  bytes  signature = 3;
+  // signature = sign(peer_id_bytes || utf8(name)) with peer private key
+  // proves ownership of the private key corresponding to peer_id
+}
+
+message RegisterPeerResponse {
+  Peer   peer  = 1;
+  string token = 2;  // bearer token for subsequent calls (in gRPC metadata)
+}
+
+message GetPeerRequest {
+  string peer_id = 1;
+}
+
+message GetPeerResponse {
+  Peer peer = 1;
+}
+
+// ── Share management ──────────────────────────────────────────────────────────
+
+message CreateShareRequest {
+  string share_id  = 1;  // Ed25519 pubkey of share keypair, base58-encoded
+  string name      = 2;
+  bytes  signature = 3;
+  // signature = sign(share_id_bytes || utf8(name)) with peer private key
+  // caller becomes the share owner
+}
+
+message CreateShareResponse {
+  Share share = 1;
+}
+
+message GetShareRequest {
+  string share_id = 1;
+}
+
+message GetShareResponse {
+  Share share = 1;
+}
+
+message AddPeerToShareRequest {
+  string     share_id   = 1;
+  string     peer_id    = 2;
+  Permission permission = 3;
+}
+
+message AddPeerToShareResponse {
+  Share share = 1;
+}
+
+message RemovePeerFromShareRequest {
+  string share_id = 1;
+  string peer_id  = 2;
+}
+
+message RemovePeerFromShareResponse {}
+
+// ── Announce / Discovery ──────────────────────────────────────────────────────
+
+message AnnounceRequest {
+  string               share_id       = 1;
+  string               peer_id        = 2;
+  repeated PeerAddress internal_addrs = 3;
+  uint32               ttl_seconds    = 4;  // client hint; registry may clamp
+  bytes                signature      = 5;
+  // signature = sign(
+  //   share_id_bytes ||
+  //   peer_id_bytes  ||
+  //   canonical_addrs_bytes ||  // addrs sorted host:port, each "host:port:is_lan\x00"
+  //   ttl_bytes              //  uint32 big-endian
+  // ) with peer private key
+  string               info_hash      = 6;  // hex info-hash; not covered by signature
+}
+
+message AnnounceResponse {
+  PeerAddress observed_external = 1;  // caller's IP:port as seen by registry
+  uint32      ttl_seconds       = 2;  // TTL actually granted by registry
+}
+
+// One-shot snapshot of current peer state for a share.
+// Call this on connect, then subscribe to WatchSharePeers for deltas.
+message GetSharePeersRequest {
+  string share_id     = 1;
+  bool   online_only  = 2;
+}
+
+message GetSharePeersResponse {
+  repeated SharePeer peers = 1;
+}
+
+// Server-streaming subscription — emits events as peer state changes.
+message WatchSharePeersRequest {
+  string share_id         = 1;
+  bool   include_offline  = 2;  // if false, only ONLINE/UPDATED events are emitted
+}
+
+message PeerEvent {
+  enum EventType {
+    EVENT_TYPE_UNSPECIFIED = 0;
+    EVENT_TYPE_ONLINE      = 1;  // peer announced; addresses populated
+    EVENT_TYPE_OFFLINE     = 2;  // peer TTL expired
+    EVENT_TYPE_UPDATED     = 3;  // peer re-announced with changed addresses
+    EVENT_TYPE_REMOVED     = 4;  // peer removed from share ACL
+  }
+  EventType                 type        = 1;
+  SharePeer                 peer        = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status  = 1;  // "ok"
+  string version = 2;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service RegistryService {
+  // Peer identity
+  rpc RegisterPeer        (RegisterPeerRequest)        returns (RegisterPeerResponse);
+  rpc GetPeer             (GetPeerRequest)             returns (GetPeerResponse);
+
+  // Share management
+  rpc CreateShare         (CreateShareRequest)         returns (CreateShareResponse);
+  rpc GetShare            (GetShareRequest)            returns (GetShareResponse);
+  rpc AddPeerToShare      (AddPeerToShareRequest)      returns (AddPeerToShareResponse);
+  rpc RemovePeerFromShare (RemovePeerFromShareRequest) returns (RemovePeerFromShareResponse);
+
+  // Announce / Discovery
+  rpc Announce            (AnnounceRequest)            returns (AnnounceResponse);
+  rpc GetSharePeers       (GetSharePeersRequest)       returns (GetSharePeersResponse);
+  rpc WatchSharePeers     (WatchSharePeersRequest)     returns (stream PeerEvent);
+
+  // Health
+  rpc Health              (HealthRequest)              returns (HealthResponse);
+}
