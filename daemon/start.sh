@@ -84,7 +84,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "y"
 
     printf '\n'
-    prompt_optional RELAY_ADDRESS "Relay address (host:port) for when two peers can't reach each other directly" "leave blank to skip"
+    prompt_optional RELAY_ADDRESS "Relay address (host:port) for when two peers can't reach each other directly"
     if [ -n "$RELAY_ADDRESS" ]; then
         RELAY_ENABLED="true"
         RELAY_TIMEOUT="120"
