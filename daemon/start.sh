@@ -77,7 +77,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
         fi
     else
         TLS_ENABLED="true"
-        printf 'Registry not set - TLS will default to enabled when you add it.\n'
+        printf '\nRegistry not set - TLS will default to enabled when you add it.\n'
     fi
 
     printf '\n'
