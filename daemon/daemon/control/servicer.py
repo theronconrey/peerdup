@@ -314,8 +314,8 @@ class ControlServicer:
     def ShowIdentity(self, request, context):
         pb = self._pb
         return pb.IdentityResponse(
-            peer_id = self._coord.peer_id,
-            name    = "",  # populated from state db in coordinator
+            peer_id = self._coord._identity.peer_id,
+            name    = self._coord._identity_name,
         )
 
     # ── Status ────────────────────────────────────────────────────────────────
