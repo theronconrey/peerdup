@@ -37,33 +37,35 @@ Two sync modes:
 
 ## Quickstart
 
-### 1. Host the registry and relay (one always-on server)
-
-You need a Linux host with a public IP, a DNS A record pointing to it, and
-[Docker CE](https://docs.docker.com/engine/install/) installed.
-
-```bash
-git clone https://github.com/theronconrey/peerdup
-cd peerdup
-./start.sh
-```
-
-Prompts for your domain and email, then starts the stack. Caddy obtains a
-Let's Encrypt certificate automatically. Subsequent runs skip the prompts.
-
-> **LAN-only?** If all your peers are on the same network, you can skip this
-> step and use `--local` shares instead - no server required.
-
-### 2. Install the daemon (each machine that syncs)
+### 1. Install (each machine)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 ```
 
-Detects your distro, installs libtorrent, and sets up the daemon. Works on
-Fedora, Ubuntu/Debian, and macOS.
+The installer asks if you also want to install the registry on this machine.
+Say yes on your always-on server; say no on laptops and workstations that
+only sync files. Works on Fedora, Ubuntu/Debian, and macOS.
 
-### 3. Configure and start
+> **LAN-only?** If all your peers are on the same network, skip the registry
+> entirely and use `--local` shares instead.
+
+> **Docker instead?** If you prefer to run the registry and relay in
+> containers with automatic TLS (Let's Encrypt), see the
+> [Docker deployment](#docker-deployment) section below.
+
+### 2. Start the registry (server only, once)
+
+On the machine where you installed the registry:
+
+```bash
+peerdup-registry-setup
+```
+
+Prompts for port and database path, then starts the registry in the
+background. Subsequent runs restart it without re-prompting.
+
+### 3. Configure and start the daemon (every machine)
 
 ```bash
 peerdup-setup
@@ -175,3 +177,19 @@ address = "your-domain:55002"
 
 The daemon tries a direct connection and a relay bridge simultaneously.
 libtorrent uses whichever connects first.
+
+## Docker deployment
+
+If you prefer containers with automatic TLS (Let's Encrypt), you can run the
+registry and relay via Docker Compose instead of `peerdup-registry-setup`.
+You need a Linux host with a public IP, a DNS A record, and Docker CE.
+
+```bash
+git clone https://github.com/theronconrey/peerdup
+cd peerdup
+./start.sh
+```
+
+Prompts for your domain and email, starts the stack, and obtains a
+Let's Encrypt certificate via Caddy automatically. Subsequent runs skip the
+prompts and restart the stack.

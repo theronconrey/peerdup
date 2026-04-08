@@ -1,5 +1,5 @@
 #!/bin/sh
-# peerdup daemon installer
+# peerdup installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/theronconrey/peerdup/main/install.sh | sh
 set -e
 
@@ -33,7 +33,24 @@ if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
 fi
 PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
 
-# ── libtorrent ─────────────────────────────────────────────────────────────────
+# ── ask what to install ────────────────────────────────────────────────────────
+
+printf '\n'
+printf '\033[1mpeerdup installer\033[0m\n'
+printf '=================\n\n'
+printf 'Install the \033[1mdaemon\033[0m (required on every machine that syncs files).\n'
+printf 'Install the \033[1mregistry\033[0m (required once, on an always-on server or this machine).\n\n'
+printf 'Skip the registry if you already have one running elsewhere,\n'
+printf 'or if you only need local-only shares (no registry needed for those).\n\n'
+
+printf 'Install the registry on this machine? [y/N]: '
+read -r INSTALL_REGISTRY
+case "$INSTALL_REGISTRY" in
+    [yY]|[yY][eE][sS]) INSTALL_REGISTRY=1 ;;
+    *) INSTALL_REGISTRY=0 ;;
+esac
+
+# ── libtorrent (daemon only) ───────────────────────────────────────────────────
 
 info "Checking for libtorrent..."
 
@@ -58,10 +75,8 @@ else
             ;;
         *)
             if command -v brew >/dev/null 2>&1; then
-                # macOS or Linuxbrew
                 brew install libtorrent-rasterbar 2>/dev/null || true
             fi
-            # Fall back to pip (builds from source - slow but portable)
             warn "No known system package for '$OS' - trying pip install libtorrent"
             "${PIP:-pip3}" install --user libtorrent
             ;;
@@ -82,15 +97,43 @@ else
     git clone --depth 1 "$REPO" "$INSTALL_DIR"
 fi
 
-# ── install daemon package ─────────────────────────────────────────────────────
+mkdir -p "$BIN_DIR"
 
+# ── install daemon package + generate protos ───────────────────────────────────
+
+info "Installing daemon..."
 "$PIP" install --user -e "$INSTALL_DIR/daemon/"
 
-# ── peerdup-setup command ──────────────────────────────────────────────────────
+info "Generating daemon gRPC stubs..."
+(cd "$INSTALL_DIR/daemon" && python3 -m grpc_tools.protoc \
+    -I proto \
+    -I "$(python3 -c 'import grpc_tools, os; print(os.path.dirname(grpc_tools.__file__))')/_proto" \
+    --python_out=. \
+    --grpc_python_out=. \
+    proto/registry.proto proto/control.proto)
+ok "Daemon stubs generated"
 
-mkdir -p "$BIN_DIR"
 ln -sf "$INSTALL_DIR/daemon/start.sh" "$BIN_DIR/peerdup-setup"
 ok "peerdup-setup linked to $BIN_DIR/peerdup-setup"
+
+# ── install registry package + generate protos (optional) ─────────────────────
+
+if [ "$INSTALL_REGISTRY" = "1" ]; then
+    info "Installing registry..."
+    "$PIP" install --user -e "$INSTALL_DIR/registry/"
+
+    info "Generating registry gRPC stubs..."
+    (cd "$INSTALL_DIR/registry" && python3 -m grpc_tools.protoc \
+        -I proto \
+        -I "$(python3 -c 'import grpc_tools, os; print(os.path.dirname(grpc_tools.__file__))')/_proto" \
+        --python_out=. \
+        --grpc_python_out=. \
+        proto/registry.proto)
+    ok "Registry stubs generated"
+
+    ln -sf "$INSTALL_DIR/registry/start.sh" "$BIN_DIR/peerdup-registry-setup"
+    ok "peerdup-registry-setup linked to $BIN_DIR/peerdup-registry-setup"
+fi
 
 # ── PATH reminder ──────────────────────────────────────────────────────────────
 
@@ -104,5 +147,13 @@ fi
 
 printf '\n'
 printf '\033[1;32mpeerdup installed.\033[0m\n\n'
-printf 'To configure and start the daemon:\n\n'
-printf '    peerdup-setup\n\n'
+
+if [ "$INSTALL_REGISTRY" = "1" ]; then
+    printf 'Start the registry first:\n\n'
+    printf '    peerdup-registry-setup\n\n'
+    printf 'Then configure the daemon on this (and every other) machine:\n\n'
+    printf '    peerdup-setup\n\n'
+else
+    printf 'To configure and start the daemon:\n\n'
+    printf '    peerdup-setup\n\n'
+fi
