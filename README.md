@@ -1,9 +1,9 @@
 # peerdup
 
-Private peer-to-peer file replication — self-hosted, no central server.
+Private peer-to-peer file replication - self-hosted, no central server.
 
 No file data passes through a central server. The registry only brokers peer
-discovery — all transfers are direct peer-to-peer via libtorrent.
+discovery - all transfers are direct peer-to-peer via libtorrent.
 
 ## Quickstart
 
@@ -26,7 +26,7 @@ pip install -e registry/
 pip install -e daemon/
 ```
 
-Proto stubs are generated automatically during `pip install` — no manual
+Proto stubs are generated automatically during `pip install` - no manual
 code generation step required.
 
 ### 3. Configure
@@ -45,17 +45,17 @@ cp daemon/config.example.toml daemon/config.toml
 ### 4. Run
 
 ```bash
-# Terminal 1 — registry
+# Terminal 1 - registry
 peerdup-registry --config registry/config.toml
 
-# Terminal 2 — daemon
+# Terminal 2 - daemon
 peerdup-daemon --config daemon/config.toml
 ```
 
 ### 5. Share a folder
 
 ```bash
-# Create a share (Machine A — owner)
+# Create a share (Machine A - owner)
 peerdup share create photos ~/Pictures
 # → prints share_id + fingerprint
 
@@ -73,7 +73,7 @@ peerdup share peers photos
 
 ```
 peerdup/
-├── registry/     # Registry server — peer discovery, ACL, presence
+├── registry/     # Registry server - peer discovery, ACL, presence
 └── daemon/       # Peer daemon + CLI
 ```
 

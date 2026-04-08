@@ -1,7 +1,7 @@
 # peerdup-registry
 
 Private gRPC registry for peer-to-peer file replication. Brokers peer
-discovery for a libtorrent-backed sync daemon — no file data passes through
+discovery for a libtorrent-backed sync daemon - no file data passes through
 the registry.
 
 ## Architecture
@@ -25,7 +25,7 @@ the registry.
 └───────────┘           └───────────┘
 ```
 
-The registry only brokers connections — it never touches file data.
+The registry only brokers connections - it never touches file data.
 All transfers are direct peer-to-peer via libtorrent.
 
 ## Installation
@@ -54,7 +54,7 @@ peerdup-registry --config config.toml
 
 ### Identity
 Every peer and share has an **Ed25519 keypair**. The public key IS the
-identity — `peer_id` and `share_id` are base58-encoded public keys.
+identity - `peer_id` and `share_id` are base58-encoded public keys.
 
 ### Registration
 Peers register by submitting their public key and a signature over
@@ -117,11 +117,11 @@ See [`config.example.toml`](config.example.toml) for all options.
 
 ## Deployment
 
-The registry is a single Python process with a SQLite database — portable,
+The registry is a single Python process with a SQLite database - portable,
 no external dependencies. For production:
 
 - Run behind a reverse proxy (nginx/caddy) or enable TLS directly
 - Use PostgreSQL by setting `database_url = "postgresql://..."`
 - Deploy as a systemd service (see `scripts/peerdup-registry.service`)
-- The registry is stateless except for the database — straightforward to
+- The registry is stateless except for the database - straightforward to
   containerise with a volume mount for the DB

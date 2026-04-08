@@ -4,7 +4,7 @@ Peer daemon for the peerdup private P2P file replication system.
 
 Runs on each machine that participates in a sync. Uses inotify (via watchdog)
 to detect local file changes, announces presence to the registry, and uses
-libtorrent for direct peer-to-peer transfers — no file data ever passes
+libtorrent for direct peer-to-peer transfers - no file data ever passes
 through the registry.
 
 ## Architecture
@@ -46,7 +46,7 @@ pip install libtorrent   # or install system package equivalent
 pip install -e .
 ```
 
-Proto stubs are generated automatically during `pip install` — no manual
+Proto stubs are generated automatically during `pip install` - no manual
 code generation step required.
 
 ## Setup
@@ -58,7 +58,7 @@ cp config.example.toml config.toml
 peerdup-daemon --config config.toml
 ```
 
-The socket path is auto-detected — no environment variable needed:
+The socket path is auto-detected - no environment variable needed:
 - User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock` (e.g. `/run/user/1000/peerdup/control.sock`)
 - Root/system installs: `/run/peerdup/control.sock`
 
@@ -114,16 +114,16 @@ peerdup share peers photos   # verify both online
 | `daemon/sync/coordinator.py` | Orchestrates all the above |
 | `daemon/control/servicer.py` | ControlService gRPC over Unix socket (for CLI) |
 | `daemon/daemon.py` | Entrypoint, boots all components |
-| `cli/peerdup.py` | CLI tool — thin gRPC client to control socket |
+| `cli/peerdup.py` | CLI tool - thin gRPC client to control socket |
 
 ## Security model
 
 **Identity**: Each peer has an Ed25519 keypair generated on first run.
 The public key is the `peer_id`. The private key lives at `identity.key_file`
-with 0600 permissions — the daemon refuses to start if it's world-readable.
+with 0600 permissions - the daemon refuses to start if it's world-readable.
 
 **Announce signatures**: Every announce is signed over
-`share_id || peer_id || canonical(addrs) || ttl` — covering addresses
+`share_id || peer_id || canonical(addrs) || ttl` - covering addresses
 prevents a rogue registry from injecting arbitrary peer addresses.
 
 **LAN discovery**: UDP multicast packets are signed with the peer's Ed25519
@@ -131,7 +131,7 @@ key and verified before injection into libtorrent. Only peers already in the
 ACL cache are accepted.
 
 **Control socket**: The Unix domain socket is created with 0600 permissions,
-accessible only to the daemon's user. No authentication needed — filesystem
+accessible only to the daemon's user. No authentication needed - filesystem
 permissions are the access control.
 
 **Transport**: TLS to the registry. libtorrent uses protocol encryption
@@ -149,7 +149,7 @@ sudo pip install -e /path/to/peerdup/daemon
 sudo cp config.example.toml /etc/peerdup/config.toml
 sudo chown -R peerdup:peerdup /var/lib/peerdup
 
-# Edit config — set registry.address, data_dir, identity.key_file
+# Edit config - set registry.address, data_dir, identity.key_file
 sudo nano /etc/peerdup/config.toml
 
 # Install and start service
@@ -167,11 +167,11 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
-| `[daemon]` | `name` | — | Human-readable peer name |
+| `[daemon]` | `name` | - | Human-readable peer name |
 | `[daemon]` | `data_dir` | `~/.local/share/peerdup` (user) / `/var/lib/peerdup` (root) | State DB + torrent cache |
 | `[daemon]` | `socket_path` | `$XDG_RUNTIME_DIR/peerdup/control.sock` (user) / `/run/peerdup/control.sock` (root) | CLI control socket |
 | `[daemon]` | `listen_port` | `55000` | libtorrent listen port |
-| `[registry]` | `address` | — | `host:port` of registry |
+| `[registry]` | `address` | - | `host:port` of registry |
 | `[registry]` | `tls` | `true` | Enable TLS to registry |
 | `[identity]` | `key_file` | `~/.local/share/peerdup/identity.key` (user) / `/var/lib/peerdup/identity.key` (root) | Ed25519 private key |
 | `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec) |
