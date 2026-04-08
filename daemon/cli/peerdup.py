@@ -236,15 +236,22 @@ def cmd_share_create(args):
             permission        = args.permission,
             import_key_hex    = import_key_hex,
             conflict_strategy = args.conflict,
+            local_only        = args.local,
         ))
         action = "imported" if import_key_hex else "created"
-        print(f"Share {action} successfully!")
+        mode   = "local" if args.local else "registry"
+        print(f"Share {action} successfully! (mode: {mode})")
         print(f"share_id    : {resp.share_id}")
         print(f"fingerprint : {resp.share_id[:8]}  (first 8 chars — verify with peers)")
         print(f"")
-        print(f"Give this share_id to peers, then have them run:")
-        print(f"  peerdup share grant {resp.share_id} <their-peer-id>")
-        print(f"  peerdup share add   {resp.share_id} <their-local-path>")
+        if args.local:
+            print(f"Local-only share - no registry required. Give this share_id to peers")
+            print(f"on the same LAN, then have them run:")
+            print(f"  peerdup share add --local {resp.share_id} <their-local-path>")
+        else:
+            print(f"Give this share_id to peers, then have them run:")
+            print(f"  peerdup share grant {resp.share_id} <their-peer-id>")
+            print(f"  peerdup share add   {resp.share_id} <their-local-path>")
         print(f"")
         _print_shares([resp.share])
     except grpc.RpcError as e:
@@ -296,6 +303,7 @@ def cmd_share_add(args):
             local_path        = args.path,
             permission        = args.permission,
             conflict_strategy = args.conflict,
+            local_only        = args.local,
         ))
         print(f"Added share:")
         _print_shares([resp.share])
@@ -503,15 +511,16 @@ def _friendly_time(iso: str) -> str:
 
 
 def _print_shares(shares):
-    col = "{:<20} {:<12} {:<8} {:>8} {:>8} {:>6}  {}"
-    print(col.format("SHARE_ID", "NAME", "STATE",
+    col = "{:<20} {:<12} {:<8} {:<8} {:>8} {:>8} {:>6}  {}"
+    print(col.format("SHARE_ID", "NAME", "MODE", "STATE",
                      "DONE", "TOTAL", "PEERS", "PATH"))
-    print("-" * 80)
+    print("-" * 88)
     for s in shares:
         done  = _human(s.bytes_done)
         total = _human(s.bytes_total)
         sid   = s.share_id[:18] + ".." if len(s.share_id) > 20 else s.share_id
-        print(col.format(sid, s.name[:12], s.state,
+        mode  = s.mode or "registry"
+        print(col.format(sid, s.name[:12], mode, s.state,
                          done, total, s.peers_online, s.local_path))
         if s.last_error:
             print(f"  ERROR: {s.last_error}")
@@ -619,9 +628,11 @@ def build_parser() -> argparse.ArgumentParser:
                           choices=["last_write_wins", "rename_conflict", "ask"],
                           dest="conflict",
                           help="Conflict resolution strategy (default: last_write_wins)")
+    create_p.add_argument("--local", action="store_true", default=False,
+                          help="Local-only share: skip registry, use LAN discovery only")
 
     add_p = share_sub.add_parser("add", help="Join an existing share")
-    add_p.add_argument("share_id",   help="Share ID (base58 pubkey from registry)")
+    add_p.add_argument("share_id",   help="Share ID to join")
     add_p.add_argument("path",       help="Local directory to sync")
     add_p.add_argument("--permission", default="rw",
                        choices=["rw", "ro", "encrypted"])
@@ -629,6 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["last_write_wins", "rename_conflict", "ask"],
                        dest="conflict",
                        help="Conflict resolution strategy (default: last_write_wins)")
+    add_p.add_argument("--local", action="store_true", default=False,
+                       help="Local-only share: skip registry validation, use LAN discovery only")
 
     rm_p = share_sub.add_parser("remove", help="Remove a share")
     rm_p.add_argument("share_id")

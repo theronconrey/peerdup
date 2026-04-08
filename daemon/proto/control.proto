@@ -15,15 +15,17 @@ message ShareStatus {
   string last_error        = 8;
   string info_hash         = 9;  // current libtorrent info-hash (hex)
   string conflict_strategy = 10; // "last_write_wins" | "rename_conflict" | "ask"
+  string mode              = 11; // "registry" | "local"
 }
 
 // ── Share management ──────────────────────────────────────────────────────────
 
 message AddShareRequest {
-  string share_id          = 1;  // must already exist in the registry
+  string share_id          = 1;  // share_id to join
   string local_path        = 2;  // absolute path to sync directory (created if absent)
   string permission        = 3;  // "rw" | "ro" | "encrypted"
   string conflict_strategy = 4;  // "last_write_wins" | "rename_conflict" | "ask" (default: last_write_wins)
+  bool   local_only        = 5;  // if true, skip registry validation - LAN discovery only
 }
 
 message AddShareResponse {
@@ -120,6 +122,7 @@ message CreateShareRequest {
   string permission        = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
   string import_key_hex    = 4;  // hex-encoded 32-byte Ed25519 seed to import; empty = generate new
   string conflict_strategy = 5;  // "last_write_wins" | "rename_conflict" | "ask" (default: last_write_wins)
+  bool   local_only        = 6;  // if true, skip registry - LAN discovery only
 }
 
 message CreateShareResponse {

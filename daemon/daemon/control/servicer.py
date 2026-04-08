@@ -39,6 +39,7 @@ class ControlServicer:
                     request.permission or "rw",
                     import_key_hex=request.import_key_hex or "",
                     conflict_strategy=request.conflict_strategy or "last_write_wins",
+                    local_only=request.local_only,
                 )
             )
             loop.close()
@@ -60,6 +61,7 @@ class ControlServicer:
                     request.local_path,
                     request.permission or "rw",
                     conflict_strategy=request.conflict_strategy or "last_write_wins",
+                    local_only=request.local_only,
                 )
             )
             loop.close()
@@ -381,15 +383,17 @@ class ControlServicer:
     def _dict_to_proto(self, d: dict):
         pb = self._pb
         return pb.ShareStatus(
-            share_id     = d.get("share_id", ""),
-            name         = d.get("name", ""),
-            local_path   = d.get("local_path", ""),
-            state        = d.get("state", ""),
-            bytes_total  = d.get("bytes_total", 0),
-            bytes_done   = d.get("bytes_done", 0),
-            peers_online = d.get("peers_online", 0),
-            last_error   = d.get("last_error", ""),
-            info_hash    = d.get("info_hash", ""),
+            share_id         = d.get("share_id", ""),
+            name             = d.get("name", ""),
+            local_path       = d.get("local_path", ""),
+            state            = d.get("state", ""),
+            bytes_total      = d.get("bytes_total", 0),
+            bytes_done       = d.get("bytes_done", 0),
+            peers_online     = d.get("peers_online", 0),
+            last_error       = d.get("last_error", ""),
+            info_hash        = d.get("info_hash", ""),
+            conflict_strategy = d.get("conflict_strategy", "last_write_wins"),
+            mode             = d.get("mode", "registry"),
         )
 
     def _dict_event_to_proto(self, d: dict):

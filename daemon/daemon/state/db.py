@@ -63,6 +63,7 @@ class LocalShare(Base):
         Enum(ConflictStrategy), nullable=False,
         default=ConflictStrategy.LAST_WRITE_WINS,
     )
+    local_only  = Column(Boolean, nullable=False, default=False)
     added_at    = Column(DateTime(timezone=True), default=utcnow)
     updated_at  = Column(DateTime(timezone=True), default=utcnow,
                          onupdate=utcnow)
@@ -165,6 +166,7 @@ def _migrate(engine):
         ("local_shares", "upload_limit",      "INTEGER NOT NULL DEFAULT 0"),
         ("local_shares", "download_limit",    "INTEGER NOT NULL DEFAULT 0"),
         ("local_shares", "conflict_strategy", "TEXT NOT NULL DEFAULT 'last_write_wins'"),
+        ("local_shares", "local_only",        "BOOLEAN NOT NULL DEFAULT 0"),
     ]
     with engine.connect() as conn:
         for table, col, typedef in migrations:
@@ -196,6 +198,7 @@ class StateDB:
     def add_share(self, share_id: str, name: str, local_path: str,
                   permission: str = "rw", is_owner: bool = False,
                   conflict_strategy: ConflictStrategy = ConflictStrategy.LAST_WRITE_WINS,
+                  local_only: bool = False,
                   ) -> LocalShare:
         with self._sf() as s:
             existing = s.query(LocalShare).filter_by(share_id=share_id).first()
@@ -214,6 +217,7 @@ class StateDB:
                 is_owner          = is_owner,
                 state             = ShareState.SYNCING,
                 conflict_strategy = conflict_strategy,
+                local_only        = local_only,
             )
             s.add(share)
             s.commit()

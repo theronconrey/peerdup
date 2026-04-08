@@ -138,11 +138,12 @@ class SyncCoordinator:
     async def create_share(self, name: str, local_path: str,
                            permission: str = "rw",
                            import_key_hex: str = "",
-                           conflict_strategy: str = "last_write_wins") -> dict:
+                           conflict_strategy: str = "last_write_wins",
+                           local_only: bool = False) -> dict:
         """
         Create a brand-new share (or re-import an existing one):
           1. Generate a fresh Ed25519 keypair — or load seed from import_key_hex
-          2. Call registry.CreateShare (signed with peer identity key)
+          2. Call registry.CreateShare (unless local_only=True)
           3. Persist share keypair locally
           4. Activate the share (watch, torrent, announce)
         Returns a status dict with share_id included.
@@ -158,18 +159,20 @@ class SyncCoordinator:
             share_seed = bytes(share_sk)
         share_id = base58.b58encode(bytes(share_sk.verify_key)).decode()
 
-        # 2. Sign CreateShare with peer identity key and call registry.
-        sig = self._identity.sign_create_share(share_id, name)
-        try:
-            self._registry.create_share(share_id, name, sig)
-        except Exception as e:
-            raise RuntimeError(f"Registry CreateShare failed: {e}") from e
+        # 2. Register with registry (skip for local-only shares).
+        if not local_only:
+            sig = self._identity.sign_create_share(share_id, name)
+            try:
+                self._registry.create_share(share_id, name, sig)
+            except Exception as e:
+                raise RuntimeError(f"Registry CreateShare failed: {e}") from e
 
         # 3. Persist share keypair locally (owner only).
         self._db.save_share_keypair(share_id, share_seed)
         self._db.add_share(share_id, name, local_path, permission,
                            is_owner=True,
-                           conflict_strategy=ConflictStrategy(conflict_strategy))
+                           conflict_strategy=ConflictStrategy(conflict_strategy),
+                           local_only=local_only)
 
         # 4. Activate.
         await self._activate_share(share_id, local_path)
@@ -177,8 +180,10 @@ class SyncCoordinator:
         status = self._lt.get_status(share_id)
         result = self._build_share_status(share_id, name, local_path,
                                           "syncing", status)
-        result["share_id"] = share_id   # ensure it's in the response
-        log.info("Created share share_id=%s name=%s", share_id, name)
+        result["share_id"] = share_id
+        result["local_only"] = local_only
+        log.info("Created share share_id=%s name=%s local_only=%s",
+                 share_id, name, local_only)
         return result
 
     async def grant_access(self, share_id: str, peer_id: str,
@@ -237,23 +242,26 @@ class SyncCoordinator:
 
     async def add_share(self, share_id: str, local_path: str,
                         permission: str = "rw",
-                        conflict_strategy: str = "last_write_wins") -> dict:
+                        conflict_strategy: str = "last_write_wins",
+                        local_only: bool = False) -> dict:
         """
-        Add a share at runtime. Fetches metadata from registry, persists
-        locally, starts watching and announces.
+        Add a share at runtime. Fetches metadata from registry (unless
+        local_only=True), persists locally, starts watching and announces.
         Returns a status dict suitable for the ControlService response.
         """
-        # Fetch share name from registry.
-        try:
-            share_proto = self._registry.get_share(share_id)
-            name = share_proto.name
-        except Exception as e:
-            log.warning("Could not fetch share from registry: %s", e)
-            name = share_id[:8]
+        # Fetch share name from registry (skip for local-only shares).
+        name = share_id[:8]
+        if not local_only:
+            try:
+                share_proto = self._registry.get_share(share_id)
+                name = share_proto.name
+            except Exception as e:
+                log.warning("Could not fetch share from registry: %s", e)
 
         # Persist to local state.
         self._db.add_share(share_id, name, local_path, permission,
-                           conflict_strategy=ConflictStrategy(conflict_strategy))
+                           conflict_strategy=ConflictStrategy(conflict_strategy),
+                           local_only=local_only)
 
         # Activate.
         await self._activate_share(share_id, local_path)
@@ -1065,6 +1073,7 @@ class SyncCoordinator:
         peers_online = len(self._db.get_online_peers(share_id))
         share = self._db.get_share(share_id)
         cs = share.conflict_strategy if share else ConflictStrategy.LAST_WRITE_WINS
+        local_only = share.local_only if share else False
         return {
             "share_id":          share_id,
             "name":              name,
@@ -1076,6 +1085,7 @@ class SyncCoordinator:
             "last_error":        last_error or "",
             "info_hash":         lt_status.info_hash   if lt_status else "",
             "conflict_strategy": cs.value if cs else "last_write_wins",
+            "mode":              "local" if local_only else "registry",
         }
 
     @property
