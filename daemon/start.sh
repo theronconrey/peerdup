@@ -167,8 +167,7 @@ DAEMON_PID=$!
 sleep 2
 
 if kill -0 "$DAEMON_PID" 2>/dev/null; then
-    printf '\033[1;32mDaemon started successfully.\033[0m\n'
-    wait "$DAEMON_PID"
+    printf '\033[1;32mDaemon started successfully (pid %s).\033[0m\n' "$DAEMON_PID"
 else
     printf '\033[1;31mDaemon failed to start. Check logs with:\033[0m\n'
     printf '    journalctl --user -xe | grep peerdup\n'
