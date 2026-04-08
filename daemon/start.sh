@@ -161,15 +161,17 @@ else
     printf 'Using existing config.toml\n\n'
 fi
 
-peerdup-daemon --config "$CONFIG_FILE" "$@" &
+LOG_FILE="${TMPDIR:-/tmp}/peerdup-daemon.log"
+peerdup-daemon --config "$CONFIG_FILE" "$@" >"$LOG_FILE" 2>&1 &
 DAEMON_PID=$!
 
 sleep 2
 
 if kill -0 "$DAEMON_PID" 2>/dev/null; then
     printf '\033[1;32mDaemon started successfully (pid %s).\033[0m\n' "$DAEMON_PID"
+    printf 'Logs: %s\n' "$LOG_FILE"
 else
-    printf '\033[1;31mDaemon failed to start. Check logs with:\033[0m\n'
-    printf '    journalctl --user -xe | grep peerdup\n'
+    printf '\033[1;31mDaemon failed to start. Logs:\033[0m\n\n'
+    cat "$LOG_FILE"
     exit 1
 fi
