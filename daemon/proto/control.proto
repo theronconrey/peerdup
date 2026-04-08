@@ -11,11 +11,14 @@ message ShareStatus {
   string state             = 4;  // "syncing" | "seeding" | "paused" | "error"
   uint64 bytes_total       = 5;
   uint64 bytes_done        = 6;
-  int32  peers_online      = 7;
+  int32  peers_online      = 7;  // registry-announced peers (known to exist)
   string last_error        = 8;
   string info_hash         = 9;  // current libtorrent info-hash (hex)
   string conflict_strategy = 10; // "last_write_wins" | "rename_conflict" | "ask"
   string mode              = 11; // "registry" | "local"
+  int32  lt_peers          = 12; // active libtorrent connections right now
+  int32  upload_rate       = 13; // bytes/sec (current aggregate)
+  int32  download_rate     = 14; // bytes/sec (current aggregate)
 }
 
 // ── Share management ──────────────────────────────────────────────────────────

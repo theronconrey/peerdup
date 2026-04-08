@@ -511,17 +511,21 @@ def _friendly_time(iso: str) -> str:
 
 
 def _print_shares(shares):
-    col = "{:<20} {:<12} {:<8} {:<8} {:>8} {:>8} {:>6}  {}"
+    col = "{:<20} {:<12} {:<8} {:<8} {:>8} {:>8} {:>8}  {}"
     print(col.format("SHARE_ID", "NAME", "MODE", "STATE",
                      "DONE", "TOTAL", "PEERS", "PATH"))
-    print("-" * 88)
+    print("  (PEERS = active/announced)")
+    print("-" * 90)
     for s in shares:
         done  = _human(s.bytes_done)
         total = _human(s.bytes_total)
         sid   = s.share_id[:18] + ".." if len(s.share_id) > 20 else s.share_id
         mode  = s.mode or "registry"
+        peers = f"{s.lt_peers}/{s.peers_online}"
         print(col.format(sid, s.name[:12], mode, s.state,
-                         done, total, s.peers_online, s.local_path))
+                         done, total, peers, s.local_path))
+        if s.upload_rate or s.download_rate:
+            print(f"       ↑ {_human(s.upload_rate)}/s  ↓ {_human(s.download_rate)}/s")
         if s.last_error:
             print(f"  ERROR: {s.last_error}")
 

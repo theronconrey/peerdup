@@ -390,6 +390,9 @@ class ControlServicer:
             info_hash        = d.get("info_hash", ""),
             conflict_strategy = d.get("conflict_strategy", "last_write_wins"),
             mode             = d.get("mode", "registry"),
+            lt_peers         = d.get("lt_peers", 0),
+            upload_rate      = d.get("upload_rate", 0),
+            download_rate    = d.get("download_rate", 0),
         )
 
     def _dict_event_to_proto(self, d: dict):
