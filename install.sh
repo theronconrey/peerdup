@@ -20,6 +20,19 @@ command -v git     >/dev/null 2>&1 || die "git not found - install git first"
 PY_VERSION=$(python3 -c 'import sys; print(sys.version_info[:2] >= (3,11))')
 [ "$PY_VERSION" = "True" ] || die "Python 3.11+ required (found $(python3 --version))"
 
+# Ensure pip is available - install it if not.
+if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
+    info "pip not found - installing python3-pip..."
+    if command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y python3-pip
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y python3-pip
+    else
+        die "pip not found - install python3-pip manually and retry"
+    fi
+fi
+PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
+
 # ── libtorrent ─────────────────────────────────────────────────────────────────
 
 info "Checking for libtorrent..."
@@ -70,9 +83,6 @@ else
 fi
 
 # ── install daemon package ─────────────────────────────────────────────────────
-
-PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null) \
-    || die "pip not found - install python3-pip first"
 
 "$PIP" install --user -e "$INSTALL_DIR/daemon/"
 
