@@ -93,13 +93,23 @@ class SyncCoordinator:
         self._lt._on_status = _lt_bridge
         self._lt.start()
 
-        # Register with registry.
-        sig = self._identity.sign_register(self._identity_name)
-        self._registry.register_peer(
-            self._identity.peer_id,
-            self._identity_name,
-            sig,
-        )
+        # Register with registry - retry with backoff until successful.
+        backoff = 1.0
+        while True:
+            try:
+                sig = self._identity.sign_register(self._identity_name)
+                self._registry.register_peer(
+                    self._identity.peer_id,
+                    self._identity_name,
+                    sig,
+                )
+                break
+            except Exception as exc:
+                log.warning(
+                    "Registry unavailable (%s) - retrying in %.0fs", exc, backoff
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
 
         # Resume all persisted shares.
         for share in self._db.list_shares():
