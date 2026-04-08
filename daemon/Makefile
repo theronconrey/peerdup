@@ -24,22 +24,7 @@ test:
 
 ## Watch a directory for changes and show events (useful for testing watcher)
 watch-test:
-	@python -c "
-import time, asyncio
-from daemon.watcher.fs import FileWatcher, FileChangedEvent
-q = asyncio.Queue()
-loop = asyncio.new_event_loop()
-bridge = FileWatcher.make_async_bridge(loop, q)
-watcher = FileWatcher(on_change=bridge)
-watcher.start()
-watcher.add_share('test-share', '/tmp/peerdup-test')
-print('Watching /tmp/peerdup-test — create/modify/delete files to see events')
-try:
-    time.sleep(60)
-except KeyboardInterrupt:
-    pass
-watcher.stop()
-"
+	@python -c "import time, asyncio; from daemon.watcher.fs import FileWatcher; q = asyncio.Queue(); loop = asyncio.new_event_loop(); bridge = FileWatcher.make_async_bridge(loop, q); w = FileWatcher(on_change=bridge); w.start(); w.add_share('test', '/tmp/peerdup-test'); print('Watching /tmp/peerdup-test (Ctrl-C to stop)'); import signal; signal.signal(signal.SIGINT, lambda *_: (w.stop(), exit(0))); time.sleep(3600)"
 
 clean:
 	rm -f registry_pb2.py registry_pb2_grpc.py

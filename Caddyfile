@@ -1,0 +1,5 @@
+{$DOMAIN} {
+    tls {$ACME_EMAIL}
+
+    reverse_proxy h2c://registry:50051
+}

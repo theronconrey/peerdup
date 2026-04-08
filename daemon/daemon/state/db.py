@@ -30,6 +30,12 @@ class ShareState(PyEnum):
     ERROR    = "error"
 
 
+class ConflictStrategy(PyEnum):
+    LAST_WRITE_WINS = "last_write_wins"
+    RENAME_CONFLICT = "rename_conflict"
+    ASK             = "ask"
+
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -51,8 +57,12 @@ class LocalShare(Base):
                          default=ShareState.SYNCING)
     info_hash      = Column(String, nullable=True)   # current libtorrent info-hash
     last_error     = Column(String, nullable=True)
-    upload_limit   = Column(Integer, nullable=False, default=0)   # bytes/sec, 0 = unlimited
-    download_limit = Column(Integer, nullable=False, default=0)
+    upload_limit      = Column(Integer, nullable=False, default=0)   # bytes/sec, 0 = unlimited
+    download_limit    = Column(Integer, nullable=False, default=0)
+    conflict_strategy = Column(
+        Enum(ConflictStrategy), nullable=False,
+        default=ConflictStrategy.LAST_WRITE_WINS,
+    )
     added_at    = Column(DateTime(timezone=True), default=utcnow)
     updated_at  = Column(DateTime(timezone=True), default=utcnow,
                          onupdate=utcnow)
@@ -95,6 +105,23 @@ class LocalFile(Base):
     share = relationship("LocalShare", back_populates="files")
 
 
+class LocalConflict(Base):
+    """
+    A pending conflict for shares using the 'ask' conflict strategy.
+    Records that a remote peer has content that differs from our local version.
+    Paused until the user resolves it via ResolveConflict RPC.
+    """
+    __tablename__ = "local_conflicts"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    share_id           = Column(String, ForeignKey("local_shares.share_id"),
+                                nullable=False)
+    remote_peer_id     = Column(String, nullable=False)
+    remote_info_hash   = Column(String, nullable=False)
+    local_info_hash    = Column(String, nullable=True)
+    detected_at        = Column(DateTime(timezone=True), default=utcnow)
+
+
 class KnownPeer(Base):
     """
     Cache of peers seen online for each share.
@@ -135,8 +162,9 @@ def make_state_db(data_dir: str):
 def _migrate(engine):
     """Add columns introduced after initial schema (idempotent)."""
     migrations = [
-        ("local_shares", "upload_limit",   "INTEGER NOT NULL DEFAULT 0"),
-        ("local_shares", "download_limit", "INTEGER NOT NULL DEFAULT 0"),
+        ("local_shares", "upload_limit",      "INTEGER NOT NULL DEFAULT 0"),
+        ("local_shares", "download_limit",    "INTEGER NOT NULL DEFAULT 0"),
+        ("local_shares", "conflict_strategy", "TEXT NOT NULL DEFAULT 'last_write_wins'"),
     ]
     with engine.connect() as conn:
         for table, col, typedef in migrations:
@@ -166,7 +194,9 @@ class StateDB:
             return s.query(LocalShare).all()
 
     def add_share(self, share_id: str, name: str, local_path: str,
-                  permission: str = "rw", is_owner: bool = False) -> LocalShare:
+                  permission: str = "rw", is_owner: bool = False,
+                  conflict_strategy: ConflictStrategy = ConflictStrategy.LAST_WRITE_WINS,
+                  ) -> LocalShare:
         with self._sf() as s:
             existing = s.query(LocalShare).filter_by(share_id=share_id).first()
             if existing:
@@ -177,12 +207,13 @@ class StateDB:
                 s.commit()
                 return existing
             share = LocalShare(
-                share_id   = share_id,
-                name       = name,
-                local_path = local_path,
-                permission = permission,
-                is_owner   = is_owner,
-                state      = ShareState.SYNCING,
+                share_id          = share_id,
+                name              = name,
+                local_path        = local_path,
+                permission        = permission,
+                is_owner          = is_owner,
+                state             = ShareState.SYNCING,
+                conflict_strategy = conflict_strategy,
             )
             s.add(share)
             s.commit()
@@ -194,6 +225,14 @@ class StateDB:
             share = s.query(LocalShare).filter_by(share_id=share_id).first()
             if share:
                 s.delete(share)
+                s.commit()
+
+    def set_conflict_strategy(self, share_id: str,
+                              strategy: ConflictStrategy):
+        with self._sf() as s:
+            share = s.query(LocalShare).filter_by(share_id=share_id).first()
+            if share:
+                share.conflict_strategy = strategy
                 s.commit()
 
     def set_share_rate_limits(self, share_id: str,
@@ -300,6 +339,37 @@ class StateDB:
             if kp:
                 return base64.b64decode(kp.seed_b64)
             return None
+
+    # ── Conflicts ─────────────────────────────────────────────────────────────
+
+    def add_conflict(self, share_id: str, remote_peer_id: str,
+                     remote_info_hash: str,
+                     local_info_hash: str | None = None) -> int:
+        with self._sf() as s:
+            c = LocalConflict(
+                share_id         = share_id,
+                remote_peer_id   = remote_peer_id,
+                remote_info_hash = remote_info_hash,
+                local_info_hash  = local_info_hash,
+            )
+            s.add(c)
+            s.commit()
+            s.refresh(c)
+            return c.id
+
+    def list_conflicts(self, share_id: str) -> list[LocalConflict]:
+        with self._sf() as s:
+            return (s.query(LocalConflict)
+                     .filter_by(share_id=share_id)
+                     .order_by(LocalConflict.detected_at)
+                     .all())
+
+    def delete_conflict(self, conflict_id: int):
+        with self._sf() as s:
+            c = s.query(LocalConflict).filter_by(id=conflict_id).first()
+            if c:
+                s.delete(c)
+                s.commit()
 
     def list_all_known_peers(self, share_id: str) -> list:
         """Return all known peers for a share (online and offline)."""

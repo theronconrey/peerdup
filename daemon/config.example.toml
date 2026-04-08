@@ -35,6 +35,11 @@ announce_interval = 30           # seconds between LAN broadcasts
 multicast_group   = "239.193.0.0"
 multicast_port    = 49152
 
+[relay]
+enabled      = false
+address      = "relay.example.com:55002"
+pair_timeout = 120   # seconds to wait for the remote peer to connect to the relay
+
 [logging]
 level = "INFO"
 

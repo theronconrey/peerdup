@@ -5,23 +5,25 @@ package control.v1;
 // ── Share status ──────────────────────────────────────────────────────────────
 
 message ShareStatus {
-  string share_id     = 1;  // base58 Ed25519 pubkey
-  string name         = 2;
-  string local_path   = 3;
-  string state        = 4;  // "syncing" | "seeding" | "paused" | "error"
-  uint64 bytes_total  = 5;
-  uint64 bytes_done   = 6;
-  int32  peers_online = 7;
-  string last_error   = 8;
-  string info_hash    = 9;  // current libtorrent info-hash (hex)
+  string share_id          = 1;  // base58 Ed25519 pubkey
+  string name              = 2;
+  string local_path        = 3;
+  string state             = 4;  // "syncing" | "seeding" | "paused" | "error"
+  uint64 bytes_total       = 5;
+  uint64 bytes_done        = 6;
+  int32  peers_online      = 7;
+  string last_error        = 8;
+  string info_hash         = 9;  // current libtorrent info-hash (hex)
+  string conflict_strategy = 10; // "last_write_wins" | "rename_conflict" | "ask"
 }
 
 // ── Share management ──────────────────────────────────────────────────────────
 
 message AddShareRequest {
-  string share_id    = 1;  // must already exist in the registry
-  string local_path  = 2;  // absolute path to sync directory (created if absent)
-  string permission  = 3;  // "rw" | "ro" | "encrypted"
+  string share_id          = 1;  // must already exist in the registry
+  string local_path        = 2;  // absolute path to sync directory (created if absent)
+  string permission        = 3;  // "rw" | "ro" | "encrypted"
+  string conflict_strategy = 4;  // "last_write_wins" | "rename_conflict" | "ask" (default: last_write_wins)
 }
 
 message AddShareResponse {
@@ -61,19 +63,63 @@ message StatusEvent {
     EVENT_TYPE_PEER_EVENT   = 2;  // peer came online / went offline
     EVENT_TYPE_SYNC_PROGRESS = 3; // bytes_done updated
     EVENT_TYPE_ERROR        = 4;  // non-fatal error
+    EVENT_TYPE_CONFLICT     = 5;  // conflict detected (ask strategy)
   }
-  EventType   type    = 1;
-  ShareStatus share   = 2;  // populated for SHARE_UPDATED / SYNC_PROGRESS
-  string      message = 3;  // human-readable detail
+  EventType   type        = 1;
+  ShareStatus share       = 2;  // populated for SHARE_UPDATED / SYNC_PROGRESS
+  string      message     = 3;  // human-readable detail
+  int32       conflict_id = 4;  // populated for CONFLICT events
+}
+
+// ── Conflict strategy ─────────────────────────────────────────────────────────
+
+message SetConflictStrategyRequest {
+  string share_id          = 1;
+  string conflict_strategy = 2;  // "last_write_wins" | "rename_conflict" | "ask"
+}
+
+message SetConflictStrategyResponse {
+  string share_id          = 1;
+  string conflict_strategy = 2;
+}
+
+// ── Conflict management ───────────────────────────────────────────────────────
+
+message ConflictInfo {
+  int32  conflict_id       = 1;
+  string share_id          = 2;
+  string remote_peer_id    = 3;  // peer whose content conflicts with ours
+  string remote_info_hash  = 4;  // their torrent hash
+  string local_info_hash   = 5;  // our torrent hash at detection time
+  string detected_at       = 6;  // ISO-8601 timestamp
+}
+
+message ListConflictsRequest {
+  string share_id = 1;
+}
+
+message ListConflictsResponse {
+  repeated ConflictInfo conflicts = 1;
+}
+
+message ResolveConflictRequest {
+  int32  conflict_id = 1;
+  string resolution  = 2;  // "keep-local" | "keep-remote"
+}
+
+message ResolveConflictResponse {
+  int32  conflict_id = 1;
+  string resolution  = 2;
 }
 
 // ── Create share ─────────────────────────────────────────────────────────────
 
 message CreateShareRequest {
-  string name           = 1;  // human-readable label
-  string local_path     = 2;  // absolute path to sync directory (created if absent)
-  string permission     = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
-  string import_key_hex = 4;  // hex-encoded 32-byte Ed25519 seed to import; empty = generate new
+  string name              = 1;  // human-readable label
+  string local_path        = 2;  // absolute path to sync directory (created if absent)
+  string permission        = 3;  // "rw" | "ro" | "encrypted" (own permission, default rw)
+  string import_key_hex    = 4;  // hex-encoded 32-byte Ed25519 seed to import; empty = generate new
+  string conflict_strategy = 5;  // "last_write_wins" | "rename_conflict" | "ask" (default: last_write_wins)
 }
 
 message CreateShareResponse {
@@ -147,14 +193,16 @@ message GetShareInfoResponse {
   bool   is_owner     = 6;
   string owner_id     = 7;   // peer_id of share creator (from registry)
   string created_at   = 8;   // ISO-8601 timestamp (from registry)
-  uint64 bytes_total  = 9;
-  uint64 bytes_done   = 10;
-  string info_hash    = 11;  // libtorrent info-hash (hex)
-  int32  peers_online   = 12;  // peers currently announcing
-  int32  total_peers    = 13;  // total peers with ACL access
-  string last_error     = 14;
-  int64  upload_limit   = 15;  // bytes/sec, 0 = unlimited
-  int64  download_limit = 16;  // bytes/sec, 0 = unlimited
+  uint64 bytes_total       = 9;
+  uint64 bytes_done        = 10;
+  string info_hash         = 11;  // libtorrent info-hash (hex)
+  int32  peers_online      = 12;  // peers currently announcing
+  int32  total_peers       = 13;  // total peers with ACL access
+  string last_error        = 14;
+  int64  upload_limit      = 15;  // bytes/sec, 0 = unlimited
+  int64  download_limit    = 16;  // bytes/sec, 0 = unlimited
+  string conflict_strategy = 17;  // "last_write_wins" | "rename_conflict" | "ask"
+  int32  pending_conflicts = 18;  // number of unresolved conflicts (ask strategy only)
 }
 
 // ── Rate limits ───────────────────────────────────────────────────────────────
@@ -195,6 +243,13 @@ service ControlService {
 
   // Rate limits
   rpc SetShareRateLimit (SetShareRateLimitRequest)  returns (SetShareRateLimitResponse);
+
+  // Conflict strategy
+  rpc SetConflictStrategy (SetConflictStrategyRequest) returns (SetConflictStrategyResponse);
+
+  // Conflict management (ask strategy)
+  rpc ListConflicts    (ListConflictsRequest)   returns (ListConflictsResponse);
+  rpc ResolveConflict  (ResolveConflictRequest) returns (ResolveConflictResponse);
 
   // Peer roster
   rpc ListSharePeers (ListSharePeersRequest) returns (ListSharePeersResponse);

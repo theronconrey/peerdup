@@ -1,0 +1,129 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR="$(dirname "$0")"
+CONFIG_FILE="$SCRIPT_DIR/config.toml"
+
+prompt() {
+    # prompt <var_name> <prompt_text> [default]
+    var="$1"
+    msg="$2"
+    default="$3"
+
+    while true; do
+        if [ -n "$default" ]; then
+            printf '%s [%s]: ' "$msg" "$default"
+        else
+            printf '%s: ' "$msg"
+        fi
+        read -r value
+        value="${value:-$default}"
+        if [ -n "$value" ]; then
+            eval "$var=\$value"
+            break
+        fi
+        printf 'This field is required.\n'
+    done
+}
+
+prompt_yn() {
+    # prompt_yn <var_name> <prompt_text> <default y|n>
+    var="$1"
+    msg="$2"
+    default="$3"
+
+    while true; do
+        printf '%s [%s]: ' "$msg" "$default"
+        read -r value
+        value="${value:-$default}"
+        case "$value" in
+            y|Y|yes|YES) eval "$var=true";  break ;;
+            n|N|no|NO)   eval "$var=false"; break ;;
+            *) printf 'Please enter y or n.\n' ;;
+        esac
+    done
+}
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    printf '\npeerdup daemon setup\n'
+    printf '====================\n\n'
+    printf 'No config.toml found. Answer a few questions to get started.\n\n'
+
+    prompt PEER_NAME        "Name for this machine (e.g. nas, laptop)"
+    prompt REGISTRY_ADDRESS "Registry address (host:port)"
+    prompt LISTEN_PORT      "libtorrent listen port" "55000"
+
+    printf '\n'
+    prompt_yn TLS_ENABLED "Use TLS for registry connection" "y"
+    if [ "$TLS_ENABLED" = "true" ]; then
+        printf 'CA cert file path (leave blank to use system CAs): '
+        read -r CA_FILE
+    fi
+
+    printf '\n'
+    prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "y"
+
+    printf '\n'
+    prompt_yn RELAY_ENABLED "Enable relay fallback for symmetric NAT" "n"
+    if [ "$RELAY_ENABLED" = "true" ]; then
+        prompt RELAY_ADDRESS "Relay address (host:port)"
+        prompt RELAY_TIMEOUT "Seconds to wait for remote peer at relay" "120"
+    fi
+
+    printf '\n'
+    prompt LOG_LEVEL "Log level (DEBUG/INFO/WARNING/ERROR)" "INFO"
+
+    # Build ca_file line only if provided
+    CA_FILE_LINE=""
+    if [ -n "$CA_FILE" ]; then
+        CA_FILE_LINE="
+ca_file = \"$CA_FILE\""
+    fi
+
+    # Build relay section
+    if [ "$RELAY_ENABLED" = "true" ]; then
+        RELAY_SECTION="
+[relay]
+enabled      = true
+address      = \"$RELAY_ADDRESS\"
+pair_timeout = $RELAY_TIMEOUT"
+    else
+        RELAY_SECTION="
+[relay]
+enabled = false"
+    fi
+
+    cat > "$CONFIG_FILE" << EOF
+[daemon]
+name        = "$PEER_NAME"
+listen_port = $LISTEN_PORT
+
+[registry]
+address = "$REGISTRY_ADDRESS"
+tls     = $TLS_ENABLED$CA_FILE_LINE
+
+[identity]
+name = "$PEER_NAME"
+
+[libtorrent]
+listen_interfaces   = "0.0.0.0:$LISTEN_PORT"
+upload_rate_limit   = 0
+download_rate_limit = 0
+
+[lan]
+enabled           = $LAN_ENABLED
+announce_interval = 30
+multicast_group   = "239.193.0.0"
+multicast_port    = 49152
+$RELAY_SECTION
+
+[logging]
+level = "$LOG_LEVEL"
+EOF
+
+    printf '\nConfiguration saved to config.toml\n\n'
+else
+    printf 'Using existing config.toml\n\n'
+fi
+
+exec peerdup-daemon --config "$CONFIG_FILE" "$@"

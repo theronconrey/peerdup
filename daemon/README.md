@@ -19,16 +19,25 @@ through the registry.
                     ┌────────┴────────┐
                     │                 │
              ┌──────┴──────┐   ┌──────┴──────┐
-             │  Daemon A   │   │  Daemon B   │
-             │  (NAS)      │◄──►  (laptop)  │
-             └─────────────┘   └─────────────┘
-                  libtorrent  ←direct P2P→  libtorrent
-                    ▲
-                    │ Unix socket
+             │  Daemon A   │◄──►  Daemon B   │  direct P2P (libtorrent)
+             │  (NAS)      │   │  (laptop)   │
+             └──────┬──────┘   └──────┬──────┘
+                    │    ╲       ╱    │
+                    │     ╲     ╱     │        relay path (symmetric NAT fallback)
+                    │      ╲   ╱      │
+                    │   ┌───┴─┴───┐   │
+                    │   │  Relay  │   │
+                    │   │ (opt.)  │   │
+                    │   └─────────┘   │
+                    │                 │
+                    ▼ Unix socket
              ┌──────┴──────┐
              │  peerdup CLI │
              └─────────────┘
 ```
+
+The relay is optional. The daemon tries a direct libtorrent connection and a
+relay bridge simultaneously - libtorrent uses whichever connects first.
 
 ## Installation
 
@@ -52,11 +61,12 @@ code generation step required.
 ## Setup
 
 ```bash
-cp config.example.toml config.toml
-# edit: set registry.address, identity.name, daemon.data_dir
-
-peerdup-daemon --config config.toml
+./start.sh
 ```
+
+On first run `start.sh` prompts for your machine name, registry address, and
+optional relay/LAN settings, writes `config.toml`, then starts the daemon.
+Subsequent runs skip the prompts and go straight to `peerdup-daemon`.
 
 The socket path is auto-detected - no environment variable needed:
 - User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock` (e.g. `/run/user/1000/peerdup/control.sock`)
@@ -74,16 +84,21 @@ peerdup share list
 peerdup share info   <name-or-id>          # metadata, no peer roster
 peerdup share peers  <name-or-id>          # peer roster: online/offline
 peerdup share create <name> <path>         # create share, print share_id + fingerprint
-peerdup share create <name> <path> --import-key <file>   # import existing keypair
+peerdup share create <name> <path> --import-key <file>     # import existing keypair
+peerdup share create <name> <path> --conflict <strategy>   # set conflict strategy at creation
 peerdup share add    <share_id> <path>     # join an existing share
+peerdup share add    <share_id> <path> --conflict <strategy>
 peerdup share grant  <name-or-id> <peer_id>
 peerdup share revoke <name-or-id> <peer_id>
 peerdup share remove <name-or-id>
-peerdup share set-limit <name-or-id> --up 10M --down 50M  # 0 = unlimited
+peerdup share set-limit    <name-or-id> --up 10M --down 50M   # 0 = unlimited
+peerdup share set-conflict <name-or-id> <strategy>            # change conflict strategy
+peerdup share conflicts    <name-or-id>                       # list pending conflicts
+peerdup share resolve      <conflict-id> keep-local|keep-remote
 peerdup share pause  <name-or-id>
 peerdup share resume <name-or-id>
 peerdup status
-peerdup watch                              # live event stream
+peerdup watch                              # live event stream (includes CONFLICT events)
 ```
 
 ### Typical first-time flow
@@ -100,17 +115,51 @@ peerdup share add <share_id> ~/Pictures
 peerdup share peers photos   # verify both online
 ```
 
+### Conflict resolution
+
+When two peers independently modify the same file, peerdup detects the
+divergence (via mismatched libtorrent info-hashes announced to the registry)
+and applies the share's **conflict strategy**:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `last_write_wins` | Accept the remote version silently (default) |
+| `rename_conflict` | Rename all locally-tracked files to `name.conflict.YYYYMMDD.HHMMSS.PEERID.ext` before accepting the remote version - nothing is lost |
+| `ask` | Pause the share and record the conflict in the local DB; resume only after you resolve it manually |
+
+```bash
+# Set strategy when creating a share
+peerdup share create docs ~/Documents --conflict rename_conflict
+
+# Change strategy on an existing share
+peerdup share set-conflict docs ask
+
+# With ask strategy - view pending conflicts
+peerdup share conflicts docs
+# → shows conflict IDs, remote peer, info-hashes, timestamp
+
+# Resolve: keep your local version (discard remote)
+peerdup share resolve 3 keep-local
+
+# Resolve: accept the remote version (your local content replaced)
+peerdup share resolve 3 keep-remote
+```
+
+`peerdup watch` emits `[CONFLICT]` events in real time when the `ask`
+strategy detects a divergence, so you can script or alert on them.
+
 ## Component overview
 
 | Module | Responsibility |
 |--------|---------------|
 | `daemon/identity.py` | Ed25519 keypair generation and signing |
 | `daemon/config.py` | TOML config loading with CLI overrides |
-| `daemon/state/db.py` | Local SQLite state (shares, files, known peers) |
+| `daemon/state/db.py` | Local SQLite state (shares, files, known peers, conflicts) |
 | `daemon/registry/client.py` | gRPC registry client + WatchSharePeers reconnect loop |
 | `daemon/watcher/fs.py` | inotify filesystem watcher with debouncing |
 | `daemon/torrent/session.py` | libtorrent session, private swarm, peer injection |
 | `daemon/lan/discovery.py` | UDP multicast LAN discovery (239.193.0.0:49152) |
+| `daemon/relay/client.py` | Relay client - pairs with relay server, bridges a local port for libtorrent |
 | `daemon/sync/coordinator.py` | Orchestrates all the above |
 | `daemon/control/servicer.py` | ControlService gRPC over Unix socket (for CLI) |
 | `daemon/daemon.py` | Entrypoint, boots all components |
@@ -146,18 +195,19 @@ sudo useradd -r -s /sbin/nologin peerdup
 # Install
 sudo mkdir -p /etc/peerdup /var/lib/peerdup
 sudo pip install -e /path/to/peerdup/daemon
-sudo cp config.example.toml /etc/peerdup/config.toml
 sudo chown -R peerdup:peerdup /var/lib/peerdup
 
-# Edit config - set registry.address, data_dir, identity.key_file
-sudo nano /etc/peerdup/config.toml
+# Generate config interactively
+sudo -u peerdup /path/to/peerdup/daemon/start.sh
+# ^ writes /path/to/peerdup/daemon/config.toml, then move it:
+sudo mv /path/to/peerdup/daemon/config.toml /etc/peerdup/config.toml
 
 # Install and start service
 sudo cp scripts/peerdup-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now peerdup-daemon
 
-# CLI access (add yourself to peerdup group and adjust socket perms, or use sudo)
+# CLI access
 sudo -u peerdup peerdup share list
 ```
 
@@ -179,3 +229,6 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 | `[lan]` | `enabled` | `true` | LAN multicast discovery |
 | `[lan]` | `multicast_group` | `239.193.0.0` | Multicast group |
 | `[lan]` | `multicast_port` | `49152` | Multicast port |
+| `[relay]` | `enabled` | `false` | Enable relay fallback for symmetric NAT |
+| `[relay]` | `address` | `""` | `host:port` of the relay server |
+| `[relay]` | `pair_timeout` | `120` | Seconds to wait for remote peer to connect to relay |

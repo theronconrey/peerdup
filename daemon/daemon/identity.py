@@ -51,6 +51,22 @@ class Identity:
         msg = base58.b58decode(share_id) + name.encode("utf-8")
         return self.sign(msg)
 
+    def sign_relay_hello(self, share_id: str, want_peer_id: str,
+                         timestamp: int) -> bytes:
+        """
+        sign(share_id_bytes || peer_id_bytes || want_peer_id_bytes || timestamp_be64)
+
+        The relay server verifies this using peer_id as the verify key.
+        Covering timestamp prevents replay attacks.
+        """
+        msg = (
+            base58.b58decode(share_id)
+            + base58.b58decode(self.peer_id)
+            + base58.b58decode(want_peer_id)
+            + timestamp.to_bytes(8, "big")
+        )
+        return self.sign(msg)
+
     def sign_announce(self, share_id: str, addrs: list[dict],
                       ttl_seconds: int) -> bytes:
         """

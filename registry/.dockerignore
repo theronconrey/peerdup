@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+.git
+*.db
+config.toml
+server.crt
+server.key
+*.pem

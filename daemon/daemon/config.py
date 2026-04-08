@@ -129,6 +129,13 @@ class LanConfig:
 
 
 @dataclass
+class RelayConfig:
+    enabled:      bool = False
+    address:      str  = ""     # "host:port" of the relay server
+    pair_timeout: int  = 120    # seconds to wait for partner to connect
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
 
@@ -147,6 +154,7 @@ class Config:
     identity:    IdentityConfig   = field(default_factory=IdentityConfig)
     libtorrent:  LibtorrentConfig = field(default_factory=LibtorrentConfig)
     lan:         LanConfig        = field(default_factory=LanConfig)
+    relay:       RelayConfig      = field(default_factory=RelayConfig)
     logging:     LoggingConfig    = field(default_factory=LoggingConfig)
     shares:      list[ShareConfig] = field(default_factory=list)
 
@@ -197,6 +205,7 @@ def _from_dict(raw: dict) -> Config:
         identity   = sub(IdentityConfig,   "identity"),
         libtorrent = sub(LibtorrentConfig, "libtorrent"),
         lan        = sub(LanConfig,        "lan"),
+        relay      = sub(RelayConfig,      "relay"),
         logging    = sub(LoggingConfig,    "logging"),
         shares     = shares,
     )

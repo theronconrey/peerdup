@@ -12,13 +12,16 @@ Commands:
     share create <name> <path>            Create a new share (generates share_id)
     share add <share_id> <path>           Join an existing share
     share remove <share_id>               Remove a share (optionally --delete-files)
-    share set-limit <share_id>            Set per-share rate limits (--up / --down)
-    share pause <share_id>                Pause syncing a share
-    share resume <share_id>               Resume a paused share
-    share grant <share_id> <peer_id>      Grant a peer access to your share
-    share revoke <share_id> <peer_id>     Revoke a peer's access
-    status                                Show current sync status
-    watch                                 Stream live status events (Ctrl-C to stop)
+    share set-limit <share_id>                       Set per-share rate limits (--up / --down)
+    share pause <share_id>                           Pause syncing a share
+    share resume <share_id>                          Resume a paused share
+    share grant <share_id> <peer_id>                 Grant a peer access to your share
+    share revoke <share_id> <peer_id>                Revoke a peer's access
+    share set-conflict <share_id> <strategy>         Set conflict resolution strategy
+    share conflicts <share_id>                       List pending conflicts (ask strategy)
+    share resolve <conflict_id> <keep-local|keep-remote>  Resolve a conflict
+    status                                           Show current sync status
+    watch                                            Stream live status events (Ctrl-C to stop)
 """
 
 from __future__ import annotations
@@ -154,6 +157,11 @@ def cmd_share_info(args):
     up_str   = f"{_human(r.upload_limit)}/s"   if r.upload_limit   else "unlimited"
     down_str = f"{_human(r.download_limit)}/s" if r.download_limit else "unlimited"
     print(f"  rate limit : ↑ {up_str}  ↓ {down_str}")
+    print(f"  conflicts  : {r.conflict_strategy}", end="")
+    if r.pending_conflicts:
+        print(f"  ({r.pending_conflicts} pending - run: peerdup share conflicts {r.share_id[:16]}..)")
+    else:
+        print()
     if r.last_error:
         print(f"  error      : {r.last_error}")
     print("─" * 60)
@@ -223,10 +231,11 @@ def cmd_share_create(args):
 
     try:
         resp = stub.CreateShare(control_pb2.CreateShareRequest(
-            name           = args.name,
-            local_path     = args.path,
-            permission     = args.permission,
-            import_key_hex = import_key_hex,
+            name              = args.name,
+            local_path        = args.path,
+            permission        = args.permission,
+            import_key_hex    = import_key_hex,
+            conflict_strategy = args.conflict,
         ))
         action = "imported" if import_key_hex else "created"
         print(f"Share {action} successfully!")
@@ -283,9 +292,10 @@ def cmd_share_add(args):
     share_id = _resolve_share(stub, args.share_id)
     try:
         resp = stub.AddShare(control_pb2.AddShareRequest(
-            share_id   = share_id,
-            local_path = args.path,
-            permission = args.permission,
+            share_id          = share_id,
+            local_path        = args.path,
+            permission        = args.permission,
+            conflict_strategy = args.conflict,
         ))
         print(f"Added share:")
         _print_shares([resp.share])
@@ -346,6 +356,63 @@ def cmd_share_resume(args):
     try:
         stub.ResumeShare(control_pb2.ResumeShareRequest(share_id=share_id))
         print(f"Resumed share {share_id}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_set_conflict(args):
+    from daemon import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
+    try:
+        resp = stub.SetConflictStrategy(control_pb2.SetConflictStrategyRequest(
+            share_id          = share_id,
+            conflict_strategy = args.strategy,
+        ))
+        print(f"Conflict strategy set for {share_id[:16]}..")
+        print(f"  strategy : {resp.conflict_strategy}")
+    except grpc.RpcError as e:
+        _err(e)
+
+
+def cmd_share_conflicts(args):
+    from daemon import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    share_id = _resolve_share(stub, args.share_id)
+    try:
+        resp = stub.ListConflicts(control_pb2.ListConflictsRequest(
+            share_id = share_id,
+        ))
+    except grpc.RpcError as e:
+        _err(e)
+        return
+
+    if not resp.conflicts:
+        print("No pending conflicts.")
+        return
+
+    print(f"Pending conflicts for share {share_id[:16]}..")
+    print("-" * 72)
+    for c in resp.conflicts:
+        detected = _format_last_seen(c.detected_at)
+        print(f"  ID       : {c.conflict_id}")
+        print(f"  Peer     : {c.remote_peer_id[:16]}..")
+        print(f"  Remote   : {c.remote_info_hash[:16]}..")
+        print(f"  Local    : {(c.local_info_hash or '(none)')[:16]}..")
+        print(f"  Detected : {detected}")
+        print(f"  Resolve  : peerdup share resolve {c.conflict_id} <keep-local|keep-remote>")
+        print()
+
+
+def cmd_share_resolve(args):
+    from daemon import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.ResolveConflict(control_pb2.ResolveConflictRequest(
+            conflict_id = args.conflict_id,
+            resolution  = args.resolution,
+        ))
+        print(f"Conflict {resp.conflict_id} resolved: {resp.resolution}")
     except grpc.RpcError as e:
         _err(e)
 
@@ -457,9 +524,13 @@ def _print_event(event):
         control_pb2.StatusEvent.EVENT_TYPE_PEER_EVENT:     "PEER",
         control_pb2.StatusEvent.EVENT_TYPE_SYNC_PROGRESS:  "PROGRESS",
         control_pb2.StatusEvent.EVENT_TYPE_ERROR:          "ERROR",
+        control_pb2.StatusEvent.EVENT_TYPE_CONFLICT:       "CONFLICT",
     }
     name = type_names.get(event.type, "?")
-    print(f"[{name}] {event.message}")
+    if event.type == control_pb2.StatusEvent.EVENT_TYPE_CONFLICT and event.conflict_id:
+        print(f"[{name}] id={event.conflict_id} {event.message}")
+    else:
+        print(f"[{name}] {event.message}")
 
 
 def _format_last_seen(iso: str) -> str:
@@ -544,12 +615,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("--import-key", metavar="PATH",
                           help="Import an existing 32-byte Ed25519 seed file "
                                "instead of generating a new keypair")
+    create_p.add_argument("--conflict", default="last_write_wins",
+                          choices=["last_write_wins", "rename_conflict", "ask"],
+                          dest="conflict",
+                          help="Conflict resolution strategy (default: last_write_wins)")
 
     add_p = share_sub.add_parser("add", help="Join an existing share")
     add_p.add_argument("share_id",   help="Share ID (base58 pubkey from registry)")
     add_p.add_argument("path",       help="Local directory to sync")
     add_p.add_argument("--permission", default="rw",
                        choices=["rw", "ro", "encrypted"])
+    add_p.add_argument("--conflict", default="last_write_wins",
+                       choices=["last_write_wins", "rename_conflict", "ask"],
+                       dest="conflict",
+                       help="Conflict resolution strategy (default: last_write_wins)")
 
     rm_p = share_sub.add_parser("remove", help="Remove a share")
     rm_p.add_argument("share_id")
@@ -579,6 +658,21 @@ def build_parser() -> argparse.ArgumentParser:
     resume_p = share_sub.add_parser("resume", help="Resume a share")
     resume_p.add_argument("share_id")
 
+    conflict_p = share_sub.add_parser(
+        "set-conflict", help="Set conflict resolution strategy for a share")
+    conflict_p.add_argument("share_id")
+    conflict_p.add_argument("strategy",
+                            choices=["last_write_wins", "rename_conflict", "ask"])
+
+    conflicts_p = share_sub.add_parser(
+        "conflicts", help="List pending conflicts (ask strategy)")
+    conflicts_p.add_argument("share_id")
+
+    resolve_p = share_sub.add_parser(
+        "resolve", help="Resolve a pending conflict")
+    resolve_p.add_argument("conflict_id", type=int)
+    resolve_p.add_argument("resolution", choices=["keep-local", "keep-remote"])
+
     sub.add_parser("status", help="Show current daemon status")
     sub.add_parser("watch",  help="Stream live status events")
 
@@ -599,17 +693,20 @@ def main():
         dispatch[args.command](args)
     elif args.command == "share":
         share_dispatch = {
-            "list":      cmd_share_list,
-            "info":      cmd_share_info,
-            "peers":     cmd_share_peers,
-            "create":    cmd_share_create,
-            "add":       cmd_share_add,
-            "remove":    cmd_share_remove,
-            "set-limit": cmd_share_set_limit,
-            "pause":     cmd_share_pause,
-            "resume":    cmd_share_resume,
-            "grant":     cmd_share_grant,
-            "revoke":    cmd_share_revoke,
+            "list":         cmd_share_list,
+            "info":         cmd_share_info,
+            "peers":        cmd_share_peers,
+            "create":       cmd_share_create,
+            "add":          cmd_share_add,
+            "remove":       cmd_share_remove,
+            "set-limit":    cmd_share_set_limit,
+            "pause":        cmd_share_pause,
+            "resume":       cmd_share_resume,
+            "grant":        cmd_share_grant,
+            "revoke":       cmd_share_revoke,
+            "set-conflict": cmd_share_set_conflict,
+            "conflicts":    cmd_share_conflicts,
+            "resolve":      cmd_share_resolve,
         }
         share_dispatch[args.share_command](args)
     else:

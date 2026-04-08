@@ -1,77 +1,78 @@
 # peerdup-registry
 
-Private gRPC registry for peer-to-peer file replication. Brokers peer
-discovery for a libtorrent-backed sync daemon - no file data passes through
-the registry.
+gRPC registry for the peerdup private P2P file replication system. Brokers
+peer discovery and access control - no file data ever passes through here.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────┐
 │         Registry (this)         │
-│  - Peer announce (ShareID→IPs)  │
+│  - Peer announce (ShareID->IPs) │
 │  - Auth / access control        │
 │  - Share metadata & peer state  │
 │  - gRPC API + server-streaming  │
 └─────────────────────────────────┘
-           ▲           ▲
-           │ announce  │ watch
-    ┌──────┘           └──────┐
-    │                         │
-┌───────────┐           ┌───────────┐
-│  Peer A   │◄─────────►│  Peer B   │
-│ (NAS)     │  direct   │ (laptop)  │
-│ libtorrent│  P2P      │ libtorrent│
-└───────────┘           └───────────┘
+           ^           ^
+           | announce  | watch
+    +------+           +------+
+    |                         |
++----------+           +----------+
+|  Peer A  |<--------->|  Peer B  |
+| libtorrent   direct  | libtorrent
++----------+    P2P    +----------+
 ```
 
 The registry only brokers connections - it never touches file data.
-All transfers are direct peer-to-peer via libtorrent.
 
-## Installation
+## Deployment (recommended - Docker)
+
+The registry ships with a Dockerfile and is orchestrated by the top-level
+`docker-compose.yml` alongside the relay and Caddy (TLS termination).
+
+From the repo root:
+
+```bash
+./start.sh
+```
+
+That's all. See the top-level README for full details.
+
+## Manual deployment
+
+If you prefer to run without Docker:
 
 ```bash
 pip install -e .
+cp config.example.toml config.toml
+# edit: set database_url, tls settings
+peerdup-registry --config config.toml
 ```
 
-Proto stubs are generated automatically during install. No separate
-code generation step needed.
-
-## Setup
+For TLS, either terminate it with a reverse proxy (Caddy, nginx) or generate
+a self-signed cert for development:
 
 ```bash
-# Copy and edit config
-cp config.example.toml config.toml
-
-# (Optional) Generate dev TLS cert
 make cert
-
-# Run
-peerdup-registry --config config.toml
 ```
 
 ## Security model
 
-### Identity
-Every peer and share has an **Ed25519 keypair**. The public key IS the
-identity - `peer_id` and `share_id` are base58-encoded public keys.
+**Identity** - every peer and share has an Ed25519 keypair. The public key IS
+the identity; `peer_id` and `share_id` are base58-encoded public keys.
 
-### Registration
-Peers register by submitting their public key and a signature over
-`peer_id_bytes || name`. The registry verifies the signature before
-issuing a bearer token. This proves the registrant holds the private key.
+**Registration** - peers register by submitting their public key and a
+signature over `peer_id_bytes || name`. The registry verifies the signature
+before issuing a bearer token.
 
-### Announce
-Each announce is signed over `share_id || peer_id || canonical(addrs) || ttl`.
-Covering the addresses prevents a rogue registry from poisoning peer tables.
+**Announce** - each announce is signed over
+`share_id || peer_id || canonical(addrs) || ttl`. Covering addresses prevents
+a rogue registry from poisoning peer tables.
 
-### Transport
-TLS (or mTLS with `ca_file`) for the gRPC transport layer. Enable in
-`config.toml`. Use Let's Encrypt or your own CA in production.
+**Transport** - TLS (or mTLS with `ca_file`) for the gRPC layer. In the Docker
+stack, Caddy terminates TLS and forwards h2c to the registry internally.
 
-### Bearer tokens
-After registration, all subsequent calls use a bearer token sent as gRPC
-`authorization` metadata. Tokens are 256-bit random values; only their
+**Bearer tokens** - 256-bit random values issued after registration; only their
 SHA-256 hash is stored.
 
 ## gRPC API
@@ -88,15 +89,16 @@ See [`proto/registry.proto`](proto/registry.proto) for the full schema.
 | `RemovePeerFromShare` | Revoke access |
 | `Announce` | Heartbeat: "I'm online at these addresses" |
 | `GetSharePeers` | Snapshot of current peer state |
-| `WatchSharePeers` | **Server-streaming**: live peer state events |
+| `WatchSharePeers` | Server-streaming: live peer state events |
 | `Health` | Liveness check |
 
 ## Development
 
 ```bash
-make test       # run pytest suite
+make install    # pip install -e ".[dev]"
 make proto      # regenerate stubs after editing the .proto
-make cert       # generate dev TLS certs (self-signed, NOT for production)
+make test       # run pytest suite
+make cert       # generate dev TLS certs (NOT for production)
 make clean      # remove generated files
 ```
 
@@ -110,18 +112,10 @@ See [`config.example.toml`](config.example.toml) for all options.
 | `port` | `50051` | gRPC port |
 | `database_url` | `sqlite:///registry.db` | SQLAlchemy URL |
 | `log_level` | `INFO` | Log verbosity |
-| `tls.enabled` | `false` | Enable TLS |
+| `tls.enabled` | `false` | Enable TLS (handled by Caddy in Docker) |
 | `tls.cert_file` | `server.crt` | TLS certificate |
 | `tls.key_file` | `server.key` | TLS private key |
-| `tls.ca_file` | `null` | CA cert for mTLS client auth |
+| `tls.ca_file` | - | CA cert for mTLS client auth |
 
-## Deployment
-
-The registry is a single Python process with a SQLite database - portable,
-no external dependencies. For production:
-
-- Run behind a reverse proxy (nginx/caddy) or enable TLS directly
-- Use PostgreSQL by setting `database_url = "postgresql://..."`
-- Deploy as a systemd service (see `scripts/peerdup-registry.service`)
-- The registry is stateless except for the database - straightforward to
-  containerise with a volume mount for the DB
+In Docker, TLS is terminated by Caddy - the registry binds plain gRPC on
+port 50051 internally and is not exposed directly to the internet.

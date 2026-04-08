@@ -38,6 +38,7 @@ class ControlServicer:
                     request.local_path,
                     request.permission or "rw",
                     import_key_hex=request.import_key_hex or "",
+                    conflict_strategy=request.conflict_strategy or "last_write_wins",
                 )
             )
             loop.close()
@@ -58,6 +59,7 @@ class ControlServicer:
                     request.share_id,
                     request.local_path,
                     request.permission or "rw",
+                    conflict_strategy=request.conflict_strategy or "last_write_wins",
                 )
             )
             loop.close()
@@ -129,6 +131,73 @@ class ControlServicer:
             log.exception("SetShareRateLimit failed")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
+    # ── Conflict strategy ─────────────────────────────────────────────────────
+
+    def SetConflictStrategy(self, request, context):
+        pb = self._pb
+        try:
+            result = self._coord.set_conflict_strategy(
+                request.share_id,
+                request.conflict_strategy or "last_write_wins",
+            )
+            return pb.SetConflictStrategyResponse(
+                share_id          = result["share_id"],
+                conflict_strategy = result["conflict_strategy"],
+            )
+        except KeyError as e:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(e))
+        except ValueError as e:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            log.exception("SetConflictStrategy failed")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    def ListConflicts(self, request, context):
+        pb = self._pb
+        try:
+            conflicts = self._coord.list_conflicts(request.share_id)
+            return pb.ListConflictsResponse(
+                conflicts=[
+                    pb.ConflictInfo(
+                        conflict_id      = c["conflict_id"],
+                        share_id         = c["share_id"],
+                        remote_peer_id   = c["remote_peer_id"],
+                        remote_info_hash = c["remote_info_hash"],
+                        local_info_hash  = c["local_info_hash"],
+                        detected_at      = c["detected_at"],
+                    )
+                    for c in conflicts
+                ]
+            )
+        except KeyError as e:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(e))
+        except Exception as e:
+            log.exception("ListConflicts failed")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    def ResolveConflict(self, request, context):
+        pb = self._pb
+        try:
+            loop   = asyncio.new_event_loop()
+            result = loop.run_until_complete(
+                self._coord.resolve_conflict(
+                    request.conflict_id,
+                    request.resolution,
+                )
+            )
+            loop.close()
+            return pb.ResolveConflictResponse(
+                conflict_id = result["conflict_id"],
+                resolution  = result["resolution"],
+            )
+        except KeyError as e:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(e))
+        except ValueError as e:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            log.exception("ResolveConflict failed")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     # ── Share info ────────────────────────────────────────────────────────────
 
     def GetShareInfo(self, request, context):
@@ -136,22 +205,24 @@ class ControlServicer:
         try:
             d = self._coord.get_share_info(request.share_id)
             return pb.GetShareInfoResponse(
-                share_id     = d["share_id"],
-                name         = d["name"],
-                local_path   = d["local_path"],
-                state        = d["state"],
-                permission   = d["permission"],
-                is_owner     = d["is_owner"],
-                owner_id     = d["owner_id"],
-                created_at   = d["created_at"],
-                bytes_total  = d["bytes_total"],
-                bytes_done   = d["bytes_done"],
-                info_hash    = d["info_hash"],
-                peers_online   = d["peers_online"],
-                total_peers    = d["total_peers"],
-                last_error     = d["last_error"],
-                upload_limit   = d["upload_limit"],
-                download_limit = d["download_limit"],
+                share_id          = d["share_id"],
+                name              = d["name"],
+                local_path        = d["local_path"],
+                state             = d["state"],
+                permission        = d["permission"],
+                is_owner          = d["is_owner"],
+                owner_id          = d["owner_id"],
+                created_at        = d["created_at"],
+                bytes_total       = d["bytes_total"],
+                bytes_done        = d["bytes_done"],
+                info_hash         = d["info_hash"],
+                peers_online      = d["peers_online"],
+                total_peers       = d["total_peers"],
+                last_error        = d["last_error"],
+                upload_limit      = d["upload_limit"],
+                download_limit    = d["download_limit"],
+                conflict_strategy = d.get("conflict_strategy", "last_write_wins"),
+                pending_conflicts = d.get("pending_conflicts", 0),
             )
         except KeyError as e:
             context.abort(grpc.StatusCode.NOT_FOUND, str(e))
@@ -328,10 +399,12 @@ class ControlServicer:
             "peer_event":     pb.StatusEvent.EVENT_TYPE_PEER_EVENT,
             "sync_progress":  pb.StatusEvent.EVENT_TYPE_SYNC_PROGRESS,
             "error":          pb.StatusEvent.EVENT_TYPE_ERROR,
+            "conflict":       pb.StatusEvent.EVENT_TYPE_CONFLICT,
         }
         etype = type_map.get(d.get("type", ""),
                              pb.StatusEvent.EVENT_TYPE_UNSPECIFIED)
         return pb.StatusEvent(
-            type    = etype,
-            message = str(d),
+            type        = etype,
+            message     = d.get("message", str(d)),
+            conflict_id = d.get("conflict_id", 0),
         )

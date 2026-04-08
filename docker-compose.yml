@@ -1,0 +1,42 @@
+services:
+  registry:
+    build: ./registry
+    restart: unless-stopped
+    volumes:
+      - registry-data:/data
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    expose:
+      - "50051"
+
+  relay:
+    build: ./relay
+    restart: unless-stopped
+    ports:
+      - "55002:55002"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SESSION_TIMEOUT=${SESSION_TIMEOUT:-300}
+      - MAX_WAITING=${MAX_WAITING:-1000}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    depends_on:
+      - registry
+
+volumes:
+  registry-data:
+  caddy-data:
+  caddy-config:

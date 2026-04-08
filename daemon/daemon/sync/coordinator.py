@@ -26,7 +26,7 @@ from nacl.signing import SigningKey
 
 from daemon.identity import Identity
 from daemon.registry.client import RegistryClient, watch_share_peers_loop
-from daemon.state.db import ShareState, StateDB
+from daemon.state.db import ConflictStrategy, ShareState, StateDB
 from daemon.torrent.session import LibtorrentSession, TorrentStatus
 from daemon.watcher.fs import FileChangedEvent, FileWatcher
 
@@ -41,20 +41,22 @@ ANNOUNCE_TTL_SECONDS      = 300
 class SyncCoordinator:
 
     def __init__(self,
-                 identity:    Identity,
-                 state_db:    StateDB,
-                 registry:    RegistryClient,
-                 lt_session:  LibtorrentSession,
-                 peer_name:   str = "",
-                 listen_port: int = 55000,
-                 data_dir:    str = "/var/lib/peerdup"):
-        self._identity    = identity
-        self._db          = state_db
-        self._registry    = registry
-        self._lt          = lt_session
-        self._peer_name   = peer_name
-        self._listen_port = listen_port
-        self._data_dir    = data_dir
+                 identity:     Identity,
+                 state_db:     StateDB,
+                 registry:     RegistryClient,
+                 lt_session:   LibtorrentSession,
+                 peer_name:    str = "",
+                 listen_port:  int = 55000,
+                 data_dir:     str = "/var/lib/peerdup",
+                 relay_config = None):
+        self._identity     = identity
+        self._db           = state_db
+        self._registry     = registry
+        self._lt           = lt_session
+        self._peer_name    = peer_name
+        self._listen_port  = listen_port
+        self._data_dir     = data_dir
+        self._relay_config = relay_config
 
         # asyncio plumbing
         self._fs_event_queue: asyncio.Queue[FileChangedEvent] = asyncio.Queue()
@@ -144,7 +146,8 @@ class SyncCoordinator:
 
     async def create_share(self, name: str, local_path: str,
                            permission: str = "rw",
-                           import_key_hex: str = "") -> dict:
+                           import_key_hex: str = "",
+                           conflict_strategy: str = "last_write_wins") -> dict:
         """
         Create a brand-new share (or re-import an existing one):
           1. Generate a fresh Ed25519 keypair — or load seed from import_key_hex
@@ -174,7 +177,8 @@ class SyncCoordinator:
         # 3. Persist share keypair locally (owner only).
         self._db.save_share_keypair(share_id, share_seed)
         self._db.add_share(share_id, name, local_path, permission,
-                           is_owner=True)
+                           is_owner=True,
+                           conflict_strategy=ConflictStrategy(conflict_strategy))
 
         # 4. Activate.
         await self._activate_share(share_id, local_path)
@@ -241,7 +245,8 @@ class SyncCoordinator:
         log.info("Revoked access share=%s peer=%s", share_id, peer_id[:8])
 
     async def add_share(self, share_id: str, local_path: str,
-                        permission: str = "rw") -> dict:
+                        permission: str = "rw",
+                        conflict_strategy: str = "last_write_wins") -> dict:
         """
         Add a share at runtime. Fetches metadata from registry, persists
         locally, starts watching and announces.
@@ -256,7 +261,8 @@ class SyncCoordinator:
             name = share_id[:8]
 
         # Persist to local state.
-        self._db.add_share(share_id, name, local_path, permission)
+        self._db.add_share(share_id, name, local_path, permission,
+                           conflict_strategy=ConflictStrategy(conflict_strategy))
 
         # Activate.
         await self._activate_share(share_id, local_path)
@@ -452,24 +458,108 @@ class SyncCoordinator:
 
         peers_online = len(self._db.get_online_peers(share_id))
 
+        cs = local_share.conflict_strategy or ConflictStrategy.LAST_WRITE_WINS
+        pending = len(self._db.list_conflicts(share_id))
+
         return {
-            "share_id":       share_id,
-            "name":           local_share.name,
-            "local_path":     local_share.local_path,
-            "state":          local_share.state.value,
-            "permission":     local_share.permission,
-            "is_owner":       bool(local_share.is_owner),
-            "owner_id":       owner_id,
-            "created_at":     created_at,
-            "bytes_total":    lt_status.bytes_total if lt_status else 0,
-            "bytes_done":     lt_status.bytes_done  if lt_status else 0,
-            "info_hash":      lt_status.info_hash    if lt_status else "",
-            "peers_online":   peers_online,
-            "total_peers":    total_peers,
-            "last_error":     local_share.last_error or "",
-            "upload_limit":   local_share.upload_limit   or 0,
-            "download_limit": local_share.download_limit or 0,
+            "share_id":          share_id,
+            "name":              local_share.name,
+            "local_path":        local_share.local_path,
+            "state":             local_share.state.value,
+            "permission":        local_share.permission,
+            "is_owner":          bool(local_share.is_owner),
+            "owner_id":          owner_id,
+            "created_at":        created_at,
+            "bytes_total":       lt_status.bytes_total if lt_status else 0,
+            "bytes_done":        lt_status.bytes_done  if lt_status else 0,
+            "info_hash":         lt_status.info_hash    if lt_status else "",
+            "peers_online":      peers_online,
+            "total_peers":       total_peers,
+            "last_error":        local_share.last_error or "",
+            "upload_limit":      local_share.upload_limit   or 0,
+            "download_limit":    local_share.download_limit or 0,
+            "conflict_strategy": cs.value,
+            "pending_conflicts": pending,
         }
+
+    def set_conflict_strategy(self, share_id: str, strategy: str) -> dict:
+        """Change the conflict resolution strategy for a share."""
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found")
+        try:
+            cs = ConflictStrategy(strategy)
+        except ValueError:
+            raise ValueError(
+                f"Invalid conflict strategy '{strategy}'. "
+                "Use: last_write_wins, rename_conflict, ask"
+            )
+        self._db.set_conflict_strategy(share_id, cs)
+        log.info("Conflict strategy set share=%s strategy=%s", share_id, strategy)
+        return {"share_id": share_id, "conflict_strategy": strategy}
+
+    def list_conflicts(self, share_id: str) -> list[dict]:
+        """Return pending conflicts for a share (only relevant for 'ask' strategy)."""
+        share = self._db.get_share(share_id)
+        if not share:
+            raise KeyError(f"Share {share_id} not found")
+        conflicts = self._db.list_conflicts(share_id)
+        return [
+            {
+                "conflict_id":      c.id,
+                "share_id":         c.share_id,
+                "remote_peer_id":   c.remote_peer_id,
+                "remote_info_hash": c.remote_info_hash,
+                "local_info_hash":  c.local_info_hash or "",
+                "detected_at":      c.detected_at.isoformat() if c.detected_at else "",
+            }
+            for c in conflicts
+        ]
+
+    async def resolve_conflict(self, conflict_id: int, resolution: str) -> dict:
+        """
+        Resolve a pending conflict.
+        resolution: "keep-local"  — discard remote version, resume seeding ours
+                    "keep-remote" — switch to remote torrent, accept their version
+        """
+        if resolution not in ("keep-local", "keep-remote"):
+            raise ValueError(
+                f"Invalid resolution '{resolution}'. "
+                "Use: keep-local or keep-remote"
+            )
+
+        # Find the conflict across all shares.
+        from daemon.state.db import LocalConflict
+        conflict = None
+        for share in self._db.list_shares():
+            for c in self._db.list_conflicts(share.share_id):
+                if c.id == conflict_id:
+                    conflict = c
+                    break
+            if conflict:
+                break
+
+        if not conflict:
+            raise KeyError(f"Conflict {conflict_id} not found")
+
+        share_id = conflict.share_id
+        self._db.delete_conflict(conflict_id)
+
+        if resolution == "keep-local":
+            # Resume seeding our local version.
+            share = self._db.get_share(share_id)
+            if share:
+                await self._activate_share(share_id, share.local_path)
+            log.info("Conflict %d resolved: keep-local share=%s", conflict_id, share_id)
+
+        else:  # keep-remote
+            # Accept the remote version.
+            await self._switch_to_remote_torrent(share_id,
+                                                  conflict.remote_info_hash)
+            log.info("Conflict %d resolved: keep-remote share=%s ih=%s",
+                     conflict_id, share_id, conflict.remote_info_hash)
+
+        return {"conflict_id": conflict_id, "resolution": resolution}
 
     def set_share_rate_limit(self, share_id: str,
                              upload_limit: int, download_limit: int) -> dict:
@@ -498,6 +588,34 @@ class SyncCoordinator:
                 last_error=share.last_error,
             ))
         return result
+
+    # ── Relay ─────────────────────────────────────────────────────────────────
+
+    async def _try_relay_bridge(self, share_id: str, peer_id: str):
+        """
+        Attempt to open a relay bridge to peer_id for share_id.
+        On success, adds 127.0.0.1:<local_port> to libtorrent as an extra
+        peer endpoint. libtorrent races direct vs relay and uses whichever
+        connects first.
+        """
+        from daemon.relay.client import open_relay_bridge
+        try:
+            local_port = await open_relay_bridge(
+                relay_address = self._relay_config.address,
+                share_id      = share_id,
+                identity      = self._identity,
+                want_peer_id  = peer_id,
+                pair_timeout  = float(self._relay_config.pair_timeout),
+            )
+            self._lt.add_peer(share_id, "127.0.0.1", local_port)
+            log.info("Relay bridge up share=%s peer=%s local_port=%d",
+                     share_id[:8], peer_id[:8], local_port)
+        except asyncio.TimeoutError:
+            log.debug("Relay bridge timed out waiting for partner share=%s peer=%s",
+                      share_id[:8], peer_id[:8])
+        except Exception as exc:
+            log.debug("Relay bridge failed share=%s peer=%s: %s",
+                      share_id[:8], peer_id[:8], exc)
 
     # ── Announce loop ─────────────────────────────────────────────────────────
 
@@ -566,9 +684,27 @@ class SyncCoordinator:
                 log.info("Peer online share=%s peer=%s addrs=%s",
                          share_id, peer_id[:8], addrs)
                 self._db.upsert_peer(share_id, peer_id, addrs, online=True)
-                # Inject addresses into libtorrent.
-                for addr in addrs:
-                    self._lt.add_peer(share_id, addr["host"], addr["port"])
+
+                # Detect info_hash mismatch: remote peer has different content.
+                remote_ih = event.peer.info_hash
+                local_share = self._db.get_share(share_id)
+                local_ih = local_share.info_hash if local_share else ""
+                if (remote_ih and local_ih and remote_ih != local_ih):
+                    await self._handle_remote_update(
+                        share_id, remote_ih, peer_id, local_share,
+                    )
+                else:
+                    # Same torrent or we have no content yet - inject peer.
+                    for addr in addrs:
+                        self._lt.add_peer(share_id, addr["host"], addr["port"])
+
+                # Attempt relay bridge alongside direct connection (fire and forget).
+                if (self._relay_config and self._relay_config.enabled
+                        and self._relay_config.address):
+                    asyncio.create_task(
+                        self._try_relay_bridge(share_id, peer_id),
+                        name=f"relay-{share_id[:8]}-{peer_id[:8]}",
+                    )
 
             elif event.type in (pb.PeerEvent.EVENT_TYPE_OFFLINE,
                                  pb.PeerEvent.EVENT_TYPE_REMOVED):
@@ -583,6 +719,108 @@ class SyncCoordinator:
             })
 
         return _handler
+
+    async def _handle_remote_update(self, share_id: str, remote_info_hash: str,
+                                    remote_peer_id: str, local_share) -> None:
+        """
+        A remote peer announced a different info_hash than we have locally.
+        Apply the share's conflict strategy before switching to their torrent.
+        """
+        strategy = local_share.conflict_strategy or ConflictStrategy.LAST_WRITE_WINS
+        log.info("Remote update detected share=%s peer=%s strategy=%s "
+                 "local_ih=%s remote_ih=%s",
+                 share_id, remote_peer_id[:8], strategy.value,
+                 local_share.info_hash, remote_info_hash)
+
+        if strategy == ConflictStrategy.LAST_WRITE_WINS:
+            await self._switch_to_remote_torrent(share_id, remote_info_hash)
+
+        elif strategy == ConflictStrategy.RENAME_CONFLICT:
+            self._rename_local_files_as_conflicts(share_id, local_share.local_path,
+                                                  remote_peer_id)
+            await self._switch_to_remote_torrent(share_id, remote_info_hash)
+
+        elif strategy == ConflictStrategy.ASK:
+            # Record the conflict and pause the share until the user resolves it.
+            conflict_id = self._db.add_conflict(
+                share_id         = share_id,
+                remote_peer_id   = remote_peer_id,
+                remote_info_hash = remote_info_hash,
+                local_info_hash  = local_share.info_hash,
+            )
+            self._db.set_share_state(share_id, ShareState.PAUSED)
+            if self._file_watcher:
+                self._file_watcher.remove_share(share_id)
+            log.info("Conflict recorded id=%d share=%s - paused awaiting resolution",
+                     conflict_id, share_id)
+            await self._publish_control_event({
+                "type":        "conflict",
+                "share_id":    share_id,
+                "conflict_id": conflict_id,
+                "message":     (
+                    f"Content conflict: peer {remote_peer_id[:8]} has different "
+                    f"version. Use 'peerdup share resolve {conflict_id} "
+                    f"<keep-local|keep-remote>' to resolve."
+                ),
+            })
+
+    def _rename_local_files_as_conflicts(self, share_id: str, local_path: str,
+                                         remote_peer_id: str) -> None:
+        """
+        Rename all locally-tracked files to conflict copies before accepting
+        the remote version. Creates: filename.conflict.TIMESTAMP.EXT
+        """
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d.%H%M%S")
+        peer_tag = remote_peer_id[:8]
+        local_root = Path(local_path)
+
+        for db_file in self._db.get_files(share_id):
+            full_path = local_root / db_file.rel_path
+            if not full_path.exists():
+                continue
+            stem   = full_path.stem
+            suffix = full_path.suffix
+            conflict_name = f"{stem}.conflict.{ts}.{peer_tag}{suffix}"
+            conflict_path = full_path.parent / conflict_name
+            try:
+                full_path.rename(conflict_path)
+                log.info("Conflict copy: %s -> %s", full_path.name, conflict_name)
+            except Exception:
+                log.exception("Failed to rename conflict file %s", full_path)
+
+    async def _switch_to_remote_torrent(self, share_id: str,
+                                        remote_info_hash: str) -> None:
+        """
+        Drop our current torrent handle and re-add with the remote peer's
+        info_hash so libtorrent fetches metadata + content from them.
+        """
+        share = self._db.get_share(share_id)
+        if not share:
+            return
+        torrent_path = os.path.join(
+            self._data_dir, "torrents", f"{share_id}.torrent"
+        )
+        # Remove the existing .torrent file so _activate_share does a fresh
+        # magnet-style bootstrap from the remote info_hash.
+        try:
+            if os.path.exists(torrent_path):
+                os.remove(torrent_path)
+        except Exception:
+            log.warning("Could not remove stale torrent file %s", torrent_path)
+
+        self._lt.remove_share(share_id, delete_files=False)
+        try:
+            ih = self._lt.add_share(
+                share_id, share.local_path,
+                torrent_path=torrent_path,
+                seed_mode=False,
+                info_hash=remote_info_hash,
+            )
+            self._db.set_share_state(share_id, ShareState.SYNCING, info_hash=ih)
+            log.info("Switched to remote torrent share=%s ih=%s", share_id, ih)
+        except Exception:
+            log.exception("Failed to switch to remote torrent share=%s", share_id)
 
     # ── Internal activation ──────────────────────────────────────────────────
 
@@ -808,16 +1046,19 @@ class SyncCoordinator:
                             state: str, lt_status: TorrentStatus | None,
                             last_error: str | None = None) -> dict:
         peers_online = len(self._db.get_online_peers(share_id))
+        share = self._db.get_share(share_id)
+        cs = share.conflict_strategy if share else ConflictStrategy.LAST_WRITE_WINS
         return {
-            "share_id":    share_id,
-            "name":        name,
-            "local_path":  local_path,
-            "state":       state,
-            "bytes_total": lt_status.bytes_total if lt_status else 0,
-            "bytes_done":  lt_status.bytes_done  if lt_status else 0,
-            "peers_online": peers_online,
-            "last_error":  last_error or "",
-            "info_hash":   lt_status.info_hash   if lt_status else "",
+            "share_id":          share_id,
+            "name":              name,
+            "local_path":        local_path,
+            "state":             state,
+            "bytes_total":       lt_status.bytes_total if lt_status else 0,
+            "bytes_done":        lt_status.bytes_done  if lt_status else 0,
+            "peers_online":      peers_online,
+            "last_error":        last_error or "",
+            "info_hash":         lt_status.info_hash   if lt_status else "",
+            "conflict_strategy": cs.value if cs else "last_write_wins",
         }
 
     @property

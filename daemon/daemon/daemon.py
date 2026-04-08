@@ -125,13 +125,14 @@ async def run(config: Config):
 
     # Coordinator
     coordinator = SyncCoordinator(
-        identity    = identity,
-        state_db    = state_db,
-        registry    = registry,
-        lt_session  = lt_session,
-        peer_name   = config.identity.name,
-        listen_port = config.daemon.listen_port,
-        data_dir    = config.daemon.data_dir,
+        identity     = identity,
+        state_db     = state_db,
+        registry     = registry,
+        lt_session   = lt_session,
+        peer_name    = config.identity.name,
+        listen_port  = config.daemon.listen_port,
+        data_dir     = config.daemon.data_dir,
+        relay_config = config.relay,
     )
 
     # Boot coordinator (registers with registry, resumes shares, starts LAN)
