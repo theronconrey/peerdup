@@ -37,11 +37,11 @@ else
 
     case "$OS" in
         fedora|rhel|centos|almalinux|rocky)
-            sudo dnf install -y rb_libtorrent-python3
+            sudo dnf install -y rb_libtorrent-python3 python3-pip
             ;;
         ubuntu|debian|linuxmint|pop)
             sudo apt-get update -qq
-            sudo apt-get install -y python3-libtorrent
+            sudo apt-get install -y python3-libtorrent python3-pip
             ;;
         *)
             if command -v brew >/dev/null 2>&1; then
