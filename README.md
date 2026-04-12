@@ -7,26 +7,7 @@ discovery; all transfers are direct peer-to-peer via libtorrent.
 
 ## How it works
 
-```
-┌─────────────────┐
-│    Registry     │   gRPC / TLS  - peer discovery, ACL, presence (optional)
-└────────┬────────┘
-         │ announce / WatchSharePeers
-  ┌──────┴──────┐
-  │             │
-┌─┴──────┐  ┌──┴─────┐
-│Daemon A│◄─►Daemon B│  direct P2P via libtorrent
-└──┬─────┘  └────────┘
-   │    ╲       ╱        relay path (symmetric NAT fallback, optional)
-   │     ╲     ╱
-   │   ┌──┴─┴──┐
-   │   │ Relay │
-   │   └───────┘
-   ▼ Unix socket
-┌──┴──────────┐
-│ peerdup CLI │
-└─────────────┘
-```
+![peerdup architecture](docs/architecture.svg)
 
 Two sync modes:
 
