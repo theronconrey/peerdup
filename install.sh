@@ -108,9 +108,9 @@ info "Generating daemon gRPC stubs..."
 (cd "$INSTALL_DIR/daemon" && python3 -m grpc_tools.protoc \
     -I proto \
     -I "$(python3 -c 'import grpc_tools, os; print(os.path.dirname(grpc_tools.__file__))')/_proto" \
-    --python_out=. \
-    --grpc_python_out=. \
-    proto/registry.proto proto/control.proto)
+    --python_out=daemon \
+    --grpc_python_out=daemon \
+    proto/control.proto)
 ok "Daemon stubs generated"
 
 ln -sf "$INSTALL_DIR/daemon/start.sh" "$BIN_DIR/peerdup-setup"
@@ -126,9 +126,11 @@ if [ "$INSTALL_REGISTRY" = "1" ]; then
     (cd "$INSTALL_DIR/registry" && python3 -m grpc_tools.protoc \
         -I proto \
         -I "$(python3 -c 'import grpc_tools, os; print(os.path.dirname(grpc_tools.__file__))')/_proto" \
-        --python_out=. \
-        --grpc_python_out=. \
-        proto/registry.proto)
+        --python_out=registry \
+        --grpc_python_out=registry \
+        proto/registry.proto && \
+        sed -i 's/^import registry_pb2 as registry__pb2$/from registry import registry_pb2 as registry__pb2/' \
+            registry/registry_pb2_grpc.py)
     ok "Registry stubs generated"
 
     ln -sf "$INSTALL_DIR/registry/start.sh" "$BIN_DIR/peerdup-registry-setup"
