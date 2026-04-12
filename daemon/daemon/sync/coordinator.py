@@ -1243,6 +1243,9 @@ class SyncCoordinator:
                         await self._handle_remote_update(
                             share_id, remote_ih, peer_id, local_share,
                         )
+                        # Inject peer into the new magnet handle so libtorrent
+                        # can fetch metadata and content from them immediately.
+                        self._lt.add_peer(share_id, host, port)
                     elif remote_seq == local_seq:
                         # True conflict: both changed since last sync.
                         log.info("LAN conflict share=%s peer=%s seq=%d - applying strategy",
@@ -1250,6 +1253,7 @@ class SyncCoordinator:
                         await self._handle_remote_update(
                             share_id, remote_ih, peer_id, local_share,
                         )
+                        self._lt.add_peer(share_id, host, port)
                     else:
                         # We have newer changes - seed to them.
                         log.info("LAN mismatch share=%s peer=%s remote_seq=%d<local=%d - seeding to them",
