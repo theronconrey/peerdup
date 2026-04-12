@@ -999,6 +999,13 @@ class SyncCoordinator:
         if not share or share.state == ShareState.PAUSED:
             return
 
+        # Don't rebuild the torrent while we're downloading from a peer.
+        # libtorrent is writing files — rebuilding from partial content would
+        # produce a wrong info_hash and cause the seeder to chase our stub.
+        if share.state == ShareState.SYNCING:
+            log.debug("FS event ignored during SYNCING share=%s", evt.share_id)
+            return
+
         # Update file index.
         local_path = Path(share.local_path) / evt.rel_path
         if evt.change_type == "deleted":
@@ -1066,6 +1073,18 @@ class SyncCoordinator:
                 status: TorrentStatus = await asyncio.wait_for(
                     self._status_queue.get(), timeout=1.0
                 )
+                # Transition SYNCING → SEEDING when libtorrent finishes.
+                # This re-enables the file watcher for future local changes.
+                if status.state in ("finished", "seeding"):
+                    share = self._db.get_share(status.share_id)
+                    if share and share.state == ShareState.SYNCING:
+                        self._db.set_share_state(
+                            status.share_id, ShareState.SEEDING,
+                            info_hash=status.info_hash,
+                        )
+                        log.info("Share download complete share=%s ih=%s",
+                                 status.share_id[:8], status.info_hash[:8])
+
                 await self._publish_control_event({
                     "type":    "sync_progress",
                     "share_id": status.share_id,
@@ -1199,8 +1218,10 @@ class SyncCoordinator:
                 )
 
                 local_ih = local_share.info_hash or ""
-                if remote_ih and local_ih and remote_ih != local_ih:
-                    # Remote peer has different content - apply conflict strategy.
+                if (remote_ih and local_ih and remote_ih != local_ih
+                        and not local_share.is_owner):
+                    # Remote peer has different content and we're not the owner
+                    # - apply conflict strategy (usually switch to remote).
                     log.info("LAN info_hash mismatch share=%s peer=%s "
                              "local=%s remote=%s",
                              share_id[:8], peer_id[:8], local_ih[:8], remote_ih[:8])
@@ -1208,7 +1229,8 @@ class SyncCoordinator:
                         share_id, remote_ih, peer_id, local_share,
                     )
                 else:
-                    # Same torrent (or one side has no content yet) - inject peer.
+                    # Same torrent, owner (never accepts remote hash), or one side
+                    # has no content yet - inject the peer address.
                     log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
                              share_id[:8], peer_id[:8], host, port)
                     self._lt.add_peer(share_id, host, port)
