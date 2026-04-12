@@ -135,6 +135,30 @@ if [ "$INSTALL_REGISTRY" = "1" ]; then
     ok "peerdup-registry-setup linked to $BIN_DIR/peerdup-registry-setup"
 fi
 
+# ── GNOME Shell extension (optional) ──────────────────────────────────────────
+
+_is_gnome() {
+    case "${XDG_CURRENT_DESKTOP:-}" in
+        *GNOME*|*gnome*) return 0 ;;
+    esac
+    command -v gnome-shell >/dev/null 2>&1
+}
+
+if _is_gnome; then
+    printf '\nGNOME Shell detected.\n'
+    printf 'Install the peerdup top-bar extension? [y/N]: '
+    read -r INSTALL_GNOME </dev/tty
+    case "$INSTALL_GNOME" in
+        [yY]|[yY][eE][sS])
+            info "Installing GNOME Shell extension..."
+            sh "$INSTALL_DIR/gnome-extension/install.sh"
+            ;;
+        *)
+            ok "Skipping GNOME extension (run gnome-extension/install.sh later if needed)"
+            ;;
+    esac
+fi
+
 # ── PATH reminder ──────────────────────────────────────────────────────────────
 
 if ! echo "$PATH" | grep -q "$BIN_DIR"; then

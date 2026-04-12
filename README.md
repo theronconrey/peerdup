@@ -178,6 +178,51 @@ address = "your-domain:55002"
 The daemon tries a direct connection and a relay bridge simultaneously.
 libtorrent uses whichever connects first.
 
+## GNOME Shell extension
+
+On GNOME desktops (Fedora, Ubuntu GNOME, etc.), peerdup includes a top-bar
+extension that shows sync status at a glance and lets you create or join shares
+without opening a terminal.
+
+The installer detects GNOME automatically and offers to install it. To install
+or reinstall it manually:
+
+```bash
+~/.local/share/peerdup/gnome-extension/install.sh
+```
+
+The icon in the top bar reflects the current state:
+
+| Icon | Meaning |
+|------|---------|
+| Idle | Daemon running, all shares up to date |
+| Syncing | Active transfer in progress |
+| Error | Daemon unavailable or a share has an error |
+
+Click the icon to see per-share status (peers, progress, transfer rates) and
+to pause/resume individual shares. If `zenity` is installed, the menu also
+offers **New share...** and **Join share...** dialogs.
+
+Requires GNOME Shell 45+ and the peerdup daemon running on the same user
+account.
+
+## Uninstall
+
+```bash
+peerdup-setup --uninstall
+```
+
+This stops and disables the systemd daemon service, removes the GNOME Shell
+extension (if installed), uninstalls all peerdup pip packages, and removes the
+`peerdup-setup` symlink. It prompts before deleting your identity key, database,
+and config so you can choose to preserve them.
+
+To also remove the registry from a server machine:
+
+```bash
+peerdup-registry-setup --uninstall
+```
+
 ## Docker deployment
 
 If you prefer containers with automatic TLS (Let's Encrypt), you can run the
