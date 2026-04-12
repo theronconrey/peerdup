@@ -35,6 +35,8 @@ function _findBin(name) {
 }
 
 const PEERDUP_BIN = _findBin('peerdup');
+const ZENITY_BIN  = _findBin('zenity');
+const HAS_ZENITY  = GLib.file_test(ZENITY_BIN, GLib.FileTest.IS_EXECUTABLE);
 
 
 export default class PeerDupExtension extends Extension {
@@ -208,16 +210,30 @@ export default class PeerDupExtension extends Extension {
             this._indicator.menu.addMenuItem(
                 new PopupMenu.PopupMenuItem('No active shares', {reactive: false})
             );
-            return;
+        } else {
+            let first = true;
+            for (const [, share] of this._shares) {
+                if (!first)
+                    this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+                first = false;
+                this._addShareSection(share);
+            }
         }
 
-        let first = true;
-        for (const [, share] of this._shares) {
-            if (!first)
-                this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-            first = false;
-            this._addShareSection(share);
-        }
+        this._addShareActions();
+    }
+
+    _addShareActions() {
+        if (!HAS_ZENITY) return;
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const createItem = new PopupMenu.PopupMenuItem('New share...');
+        createItem.connect('activate', () => this._showCreateShare());
+        this._indicator.menu.addMenuItem(createItem);
+
+        const joinItem = new PopupMenu.PopupMenuItem('Join share...');
+        joinItem.connect('activate', () => this._showJoinShare());
+        this._indicator.menu.addMenuItem(joinItem);
     }
 
     _addShareSection(share) {
@@ -278,19 +294,83 @@ export default class PeerDupExtension extends Extension {
         this._indicator.menu.addMenuItem(pauseItem);
     }
 
-    _togglePause(shareId, currentlyPaused) {
-        const cmd = currentlyPaused ? 'resume' : 'pause';
+    // ── Share creation / joining ───────────────────────────────────────────
+
+    _showCreateShare() {
+        this._zenityEntry('New share', 'Share name:', (name) => {
+            if (!name) return;
+            this._zenityFolder('Select folder to sync', (path) => {
+                if (!path) return;
+                this._runCmd([PEERDUP_BIN, 'share', 'create', name, path, '--local'],
+                    () => this._pollStatus());
+            });
+        });
+    }
+
+    _showJoinShare() {
+        this._zenityEntry('Join share', 'Share ID:', (shareId) => {
+            if (!shareId) return;
+            this._zenityFolder('Select folder to sync', (path) => {
+                if (!path) return;
+                this._runCmd([PEERDUP_BIN, 'share', 'add', shareId, path, '--local'],
+                    () => this._pollStatus());
+            });
+        });
+    }
+
+    _zenityEntry(title, prompt, callback) {
+        this._runZenity(
+            [ZENITY_BIN, '--entry', `--title=${title}`, `--text=${prompt}`],
+            callback
+        );
+    }
+
+    _zenityFolder(title, callback) {
+        this._runZenity(
+            [ZENITY_BIN, '--file-selection', '--directory', `--title=${title}`],
+            callback
+        );
+    }
+
+    _runZenity(argv, callback) {
         try {
             const proc = new Gio.Subprocess({
-                argv:  [PEERDUP_BIN, 'share', cmd, shareId],
-                flags: Gio.SubprocessFlags.NONE,
+                argv,
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE,
             });
             proc.init(null);
-            // Refresh after the daemon has time to process the command.
-            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1,
-                () => { this._pollStatus(); return GLib.SOURCE_REMOVE; }
-            );
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                try {
+                    const [, stdout] = p.communicate_utf8_finish(res);
+                    const result = stdout?.trim() ?? '';
+                    callback(p.get_exit_status() === 0 && result ? result : null);
+                } catch (_) {
+                    callback(null);
+                }
+            });
+        } catch (_) {
+            callback(null);
+        }
+    }
+
+    _runCmd(argv, onDone) {
+        try {
+            const proc = new Gio.Subprocess({
+                argv,
+                flags: Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            proc.init(null);
+            proc.wait_async(null, () => {
+                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1,
+                    () => { onDone?.(); return GLib.SOURCE_REMOVE; }
+                );
+            });
         } catch (_) {}
+    }
+
+    _togglePause(shareId, currentlyPaused) {
+        const cmd = currentlyPaused ? 'resume' : 'pause';
+        this._runCmd([PEERDUP_BIN, 'share', cmd, shareId], () => this._pollStatus());
     }
 
     // ── Icon state ─────────────────────────────────────────────────────────
