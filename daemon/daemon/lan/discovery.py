@@ -3,25 +3,31 @@ LAN peer discovery via IPv4 UDP multicast.
 
 Peers broadcast a signed announcement packet every announce_interval seconds.
 Listeners verify the Ed25519 signature, then call on_peer_seen for each
-(peer_id, share_ids, host, libtorrent_port) tuple — letting the coordinator
-inject valid peers directly into libtorrent without going through the registry.
+(peer_id, share_ids, host, libtorrent_port, name) tuple — letting the
+coordinator inject valid peers directly into libtorrent without going through
+the registry.
 
-Wire format (version 1, all integers big-endian)
+Wire format (version 2, all integers big-endian)
 ────────────────────────────────────────────────
  Offset  Size  Field
-      0     1  version        = 1
+      0     1  version        = 2
       1    32  peer_id_bytes  (raw 32-byte Ed25519 public key)
      33     2  listen_port    (uint16)
      35     2  share_count    (uint16)
      37  32*n  share_id_bytes (share_count × 32-byte Ed25519 public keys)
-  37+32n   64  signature      (Ed25519, covers all preceding bytes)
+  37+32n    2  name_len       (uint16, byte length of UTF-8 name)
+  39+32n    *  name_bytes     (UTF-8 encoded peer name, name_len bytes)
+  end-64   64  signature      (Ed25519, covers all preceding bytes)
 
 Signature message = everything before the trailing 64 signature bytes.
 The signature is verified with the public key embedded as peer_id_bytes,
 proving the sender holds the private key whose public key IS their peer_id.
 
-Minimum valid packet (zero shares): 101 bytes.
-Maximum practical packet (100 shares): 3301 bytes — well within UDP limits.
+Version 1 packets (no name field) are still accepted; name defaults to "".
+
+Minimum valid packet v2 (zero shares, empty name): 103 bytes.
+Maximum practical packet (100 shares, 64-byte name): 3367 bytes — well
+within UDP limits.
 """
 
 from __future__ import annotations
@@ -40,11 +46,13 @@ log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VERSION      = 1
+VERSION      = 2
 PEER_ID_LEN  = 32   # raw Ed25519 pubkey
 SHARE_ID_LEN = 32
 SIG_LEN      = 64
-_MIN_PACKET  = 1 + PEER_ID_LEN + 2 + 2 + SIG_LEN  # 101 bytes
+_MIN_PACKET_V1 = 1 + PEER_ID_LEN + 2 + 2 + SIG_LEN        # 101 bytes
+_MIN_PACKET_V2 = 1 + PEER_ID_LEN + 2 + 2 + 2 + SIG_LEN    # 103 bytes
+_MIN_PACKET    = _MIN_PACKET_V1
 
 
 def detect_multicast_interface() -> str:
@@ -68,33 +76,39 @@ def detect_multicast_interface() -> str:
 
 # ── Packet codec ─────────────────────────────────────────────────────────────
 
-def pack_packet(identity, share_ids: list[str], listen_port: int) -> bytes:
+def pack_packet(identity, share_ids: list[str], listen_port: int,
+                peer_name: str = "") -> bytes:
     """
-    Encode and sign an announcement packet.
+    Encode and sign an announcement packet (version 2).
 
-    identity   — daemon.identity.Identity (provides peer_id + sign())
-    share_ids  — base58-encoded share IDs to announce
+    identity    — daemon.identity.Identity (provides peer_id + sign())
+    share_ids   — base58-encoded share IDs to announce
     listen_port — libtorrent TCP listen port
+    peer_name   — human-readable machine name (included in v2 packets)
     """
     peer_id_bytes = base58.b58decode(identity.peer_id)
     share_bytes   = [base58.b58decode(sid) for sid in share_ids]
     n             = len(share_bytes)
+    name_bytes    = peer_name.encode("utf-8")[:255]   # cap at 255 bytes
 
     body  = struct.pack("!B", VERSION)
     body += peer_id_bytes
     body += struct.pack("!HH", listen_port, n)
     for sb in share_bytes:
         body += sb
+    body += struct.pack("!H", len(name_bytes))
+    body += name_bytes
 
     sig = identity.sign(body)
     return body + sig
 
 
-def unpack_packet(data: bytes) -> tuple[str, list[str], int] | None:
+def unpack_packet(data: bytes) -> tuple[str, list[str], int, str] | None:
     """
     Decode and verify an announcement packet.
 
-    Returns (peer_id, share_ids, listen_port) on success, None on any error.
+    Returns (peer_id, share_ids, listen_port, name) on success, None on error.
+    Accepts both version 1 (no name) and version 2 (with name) packets.
     Does NOT check whether the peer_id is our own — callers must do that.
     """
     if len(data) < _MIN_PACKET:
@@ -102,7 +116,7 @@ def unpack_packet(data: bytes) -> tuple[str, list[str], int] | None:
 
     pos = 0
     version = data[pos]; pos += 1
-    if version != VERSION:
+    if version not in (1, 2):
         log.debug("LAN packet: unknown version %d", version)
         return None
 
@@ -114,15 +128,30 @@ def unpack_packet(data: bytes) -> tuple[str, list[str], int] | None:
         return None
     listen_port, n_shares = struct.unpack_from("!HH", data, pos); pos += 4
 
-    expected = 1 + PEER_ID_LEN + 4 + n_shares * SHARE_ID_LEN + SIG_LEN
-    if len(data) != expected:
-        log.debug("LAN packet: length mismatch (got %d expected %d)",
-                  len(data), expected)
-        return None
-
     share_bytes = []
     for _ in range(n_shares):
+        if pos + SHARE_ID_LEN > len(data):
+            return None
         share_bytes.append(data[pos:pos + SHARE_ID_LEN]); pos += SHARE_ID_LEN
+
+    # Version 2: name field before signature.
+    name = ""
+    if version == 2:
+        if pos + 2 > len(data):
+            return None
+        name_len, = struct.unpack_from("!H", data, pos); pos += 2
+        if pos + name_len > len(data):
+            return None
+        try:
+            name = data[pos:pos + name_len].decode("utf-8"); pos += name_len
+        except UnicodeDecodeError:
+            pos += name_len   # skip malformed name
+
+    # Everything before the trailing signature is the signed body.
+    if len(data) - pos != SIG_LEN:
+        log.debug("LAN packet: length mismatch after fields (remaining=%d)",
+                  len(data) - pos)
+        return None
 
     body = data[:-SIG_LEN]
     sig  = data[-SIG_LEN:]
@@ -139,7 +168,7 @@ def unpack_packet(data: bytes) -> tuple[str, list[str], int] | None:
 
     peer_id   = base58.b58encode(peer_id_bytes).decode()
     share_ids = [base58.b58encode(sb).decode() for sb in share_bytes]
-    return peer_id, share_ids, listen_port
+    return peer_id, share_ids, listen_port, name
 
 
 # ── asyncio DatagramProtocol ──────────────────────────────────────────────────
@@ -173,23 +202,26 @@ class LanDiscovery:
     identity          — daemon Identity (peer_id + signing)
     config            — LanConfig (group, port, interval, interface)
     get_share_ids     — sync callable returning list[str] of active share_ids
-    on_peer_seen      — async(peer_id, share_ids, host, port) called on each
-                        valid remote announcement; caller performs ACL check
+    on_peer_seen      — async(peer_id, share_ids, host, port, name) called on
+                        each valid remote announcement; caller performs ACL check
     listen_port       — this peer's libtorrent TCP listen port to advertise
+    peer_name         — human-readable name included in outgoing v2 packets
     """
 
     def __init__(self,
                  identity,
                  config,
                  get_share_ids:  Callable[[], list[str]],
-                 on_peer_seen:   Callable[[str, list[str], str, int],
+                 on_peer_seen:   Callable[[str, list[str], str, int, str],
                                           Awaitable[None]],
-                 listen_port:    int):
+                 listen_port:    int,
+                 peer_name:      str = ""):
         self._identity      = identity
         self._config        = config
         self._get_share_ids = get_share_ids
         self._on_peer_seen  = on_peer_seen
         self._listen_port   = listen_port
+        self._peer_name     = peer_name
 
         self._transport: asyncio.BaseTransport | None = None
         self._sender_sock: socket.socket | None = None
@@ -287,7 +319,7 @@ class LanDiscovery:
                 share_ids = self._get_share_ids()
                 if share_ids:
                     packet = pack_packet(self._identity, share_ids,
-                                         self._listen_port)
+                                         self._listen_port, self._peer_name)
                     for dest in dests:
                         try:
                             await loop.run_in_executor(
@@ -313,17 +345,17 @@ class LanDiscovery:
             log.debug("LAN datagram from %s failed to unpack (len=%d)", host, len(data))
             return
 
-        peer_id, share_ids, listen_port = result
+        peer_id, share_ids, listen_port, name = result
 
         # Reject our own packets.
         if peer_id == self._identity.peer_id:
             return
 
-        log.debug("LAN packet from peer=%s shares=%d addr=%s:%d",
-                  peer_id[:8], len(share_ids), host, listen_port)
+        log.debug("LAN packet from peer=%s name=%r shares=%d addr=%s:%d",
+                  peer_id[:8], name, len(share_ids), host, listen_port)
 
         asyncio.create_task(
-            self._on_peer_seen(peer_id, share_ids, host, listen_port),
+            self._on_peer_seen(peer_id, share_ids, host, listen_port, name),
             name=f"lan-peer-{peer_id[:8]}",
         )
 

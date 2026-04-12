@@ -116,6 +116,7 @@ class SyncCoordinator:
                 get_share_ids = self._get_active_share_ids,
                 on_peer_seen  = self._on_lan_peer,
                 listen_port   = self._listen_port,
+                peer_name     = self._peer_name,
             )
             await self._lan.start()
 
@@ -249,18 +250,22 @@ class SyncCoordinator:
     async def add_share(self, share_id: str, local_path: str,
                         permission: str = "rw",
                         conflict_strategy: str = "last_write_wins",
-                        local_only: bool = False) -> dict:
+                        local_only: bool = False,
+                        name: str = "") -> dict:
         """
         Add a share at runtime. Fetches metadata from registry (unless
         local_only=True), persists locally, starts watching and announces.
         Returns a status dict suitable for the ControlService response.
         """
         # Fetch share name from registry (skip for local-only shares).
-        name = share_id[:8]
+        # User-supplied name takes precedence over registry name.
+        if not name:
+            name = share_id[:8]
         if not local_only:
             try:
                 share_proto = self._registry.get_share(share_id)
-                name = share_proto.name
+                if not name or name == share_id[:8]:
+                    name = share_proto.name
             except Exception as e:
                 log.warning("Could not fetch share from registry: %s", e)
 
@@ -374,16 +379,19 @@ class SyncCoordinator:
             is_self   = (pid == self._identity.peer_id)
             is_online = (pid in known)
 
-            # Permission: prefer registry (authoritative), fall back to local.
+            # Permission: registry is authoritative; local-only shares are rw.
             permission = "unknown"
             if reg_peer:
                 perm_val = reg_peer.permission
-                # Convert proto enum int to string.
                 perm_map = {1: "rw", 2: "ro", 3: "encrypted"}
                 permission = perm_map.get(perm_val, "unknown")
+            elif local_share and local_share.local_only:
+                permission = "rw"
 
-            # Name: from registry SharePeer.
-            name = reg_peer.name if reg_peer else pid[:8]
+            # Name: registry > LAN-announced name > peer_id prefix.
+            name = (reg_peer.name if reg_peer
+                    else (loc_peer.name if loc_peer and loc_peer.name
+                          else pid[:8]))
 
             # Addresses: from known_peers if online.
             addresses = []
@@ -1073,7 +1081,7 @@ class SyncCoordinator:
                 if s.state != ShareState.PAUSED]
 
     async def _on_lan_peer(self, peer_id: str, share_ids: list[str],
-                           host: str, port: int):
+                           host: str, port: int, name: str = ""):
         """
         Called by LanDiscovery for each verified remote announcement.
 
@@ -1102,6 +1110,7 @@ class SyncCoordinator:
                     peer_id,
                     [{"host": host, "port": port, "is_lan": True}],
                     online=True,
+                    name=name,
                 )
         except Exception:
             log.exception("_on_lan_peer failed peer=%s shares=%s",

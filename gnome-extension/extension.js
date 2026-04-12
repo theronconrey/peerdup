@@ -310,10 +310,16 @@ export default class PeerDupExtension extends Extension {
     _showJoinShare() {
         this._zenityEntry('Join share', 'Share ID:', (shareId) => {
             if (!shareId) return;
-            this._zenityFolder('Select folder to sync', (path) => {
-                if (!path) return;
-                this._runCmd([PEERDUP_BIN, 'share', 'add', shareId, path, '--local'],
-                    () => this._pollStatus());
+            this._zenityEntry('Join share', 'Local name for this share:', (name) => {
+                if (!name) return;
+                this._zenityFolder('Select folder to sync', (path) => {
+                    if (!path) return;
+                    this._runCmd(
+                        [PEERDUP_BIN, 'share', 'add', shareId, path,
+                         '--local', '--name', name],
+                        () => this._pollStatus()
+                    );
+                });
             });
         });
     }

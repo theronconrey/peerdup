@@ -71,6 +71,7 @@ class ControlServicer:
                     request.permission or "rw",
                     conflict_strategy=request.conflict_strategy or "last_write_wins",
                     local_only=request.local_only,
+                    name=request.name or "",
                 )
             )
             return pb.AddShareResponse(share=self._dict_to_proto(status))

@@ -29,6 +29,7 @@ message AddShareRequest {
   string permission        = 3;  // "rw" | "ro" | "encrypted"
   string conflict_strategy = 4;  // "last_write_wins" | "rename_conflict" | "ask" (default: last_write_wins)
   bool   local_only        = 5;  // if true, skip registry validation - LAN discovery only
+  string name              = 6;  // human-readable local alias (optional; registry name used if blank)
 }
 
 message AddShareResponse {

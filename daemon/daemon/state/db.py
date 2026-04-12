@@ -135,6 +135,7 @@ class KnownPeer(Base):
     id        = Column(Integer, primary_key=True, autoincrement=True)
     share_id  = Column(String, nullable=False)
     peer_id   = Column(String, nullable=False)
+    name      = Column(String, nullable=False, default="")
     # JSON list of {"host": str, "port": int, "is_lan": bool}
     addresses = Column(Text, nullable=False, default="[]")
     online    = Column(Boolean, nullable=False, default=False)
@@ -167,6 +168,7 @@ def _migrate(engine):
         ("local_shares", "download_limit",    "INTEGER NOT NULL DEFAULT 0"),
         ("local_shares", "conflict_strategy", "TEXT NOT NULL DEFAULT 'last_write_wins'"),
         ("local_shares", "local_only",        "BOOLEAN NOT NULL DEFAULT 0"),
+        ("known_peers",  "name",              "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
         for table, col, typedef in migrations:
@@ -293,7 +295,7 @@ class StateDB:
     # ── Known peers ───────────────────────────────────────────────────────────
 
     def upsert_peer(self, share_id: str, peer_id: str,
-                    addresses: list[dict], online: bool):
+                    addresses: list[dict], online: bool, name: str = ""):
         with self._sf() as s:
             p = (s.query(KnownPeer)
                   .filter_by(share_id=share_id, peer_id=peer_id)
@@ -302,10 +304,13 @@ class StateDB:
                 p.addresses = json.dumps(addresses)
                 p.online    = online
                 p.last_seen = utcnow() if online else p.last_seen
+                if name:
+                    p.name = name
             else:
                 s.add(KnownPeer(
                     share_id  = share_id,
                     peer_id   = peer_id,
+                    name      = name,
                     addresses = json.dumps(addresses),
                     online    = online,
                     last_seen = utcnow() if online else None,

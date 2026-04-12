@@ -309,6 +309,7 @@ def cmd_share_add(args):
             permission        = args.permission,
             conflict_strategy = args.conflict,
             local_only        = args.local,
+            name              = args.name,
         ))
         print(f"Added share:")
         _print_shares([resp.share])
@@ -696,6 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Conflict resolution strategy (default: last_write_wins)")
     add_p.add_argument("--local", action="store_true", default=False,
                        help="Local-only share: skip registry validation, use LAN discovery only")
+    add_p.add_argument("--name", default="",
+                       help="Human-readable local alias (default: share name from registry)")
 
     rm_p = share_sub.add_parser("remove", help="Remove a share")
     rm_p.add_argument("share_id")
