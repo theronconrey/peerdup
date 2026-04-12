@@ -17,3 +17,16 @@ key_file  = "server.key"
 # Uncomment to require client certificates (mTLS).
 # Generate client certs with: make client-cert
 # ca_file = "server.crt"
+
+[rate_limit]
+# Maximum announces per minute per peer per share (token bucket).
+# Set to 0 to disable rate limiting.
+announce_per_minute = 30
+
+[audit]
+# Structured JSON audit log of every authenticated action.
+# Disabled by default -- enable for production deployments.
+enabled      = false
+log_file     = "audit.log"   # relative to CWD or absolute path
+# max_bytes    = 10485760     # 10 MB per file (default)
+# backup_count = 5            # keep 5 rotated files (default)

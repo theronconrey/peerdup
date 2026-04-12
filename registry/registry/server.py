@@ -18,8 +18,9 @@ from pathlib import Path
 
 import grpc
 
+from registry.audit import make_audit_logger
 from registry.db.models import create_tables, make_engine, make_session_factory
-from registry.servicer.registry import RegistryServicer
+from registry.servicer.registry import RegistryServicer, RateLimiter
 from registry.ttl import ttl_sweep_loop
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,15 @@ def load_config(path: str | None) -> dict:
             "cert_file": "server.crt",
             "key_file":  "server.key",
             "ca_file":   None,   # Set for mTLS client certificate auth
+        },
+        "rate_limit": {
+            "announce_per_minute": 30,  # per peer per share; 0 = unlimited
+        },
+        "audit": {
+            "enabled":      False,
+            "log_file":     "audit.log",
+            "max_bytes":    10 * 1024 * 1024,  # 10 MB
+            "backup_count": 5,
         },
         "log_level": "INFO",
         "max_workers": 10,
@@ -56,9 +66,11 @@ def load_config(path: str | None) -> dict:
     with open(path, "rb") as f:
         user = tomllib.load(f)
 
-    # Shallow merge top-level, deep merge tls section.
+    # Shallow merge top-level, deep merge nested sections.
     merged = {**defaults, **user}
-    merged["tls"] = {**defaults["tls"], **user.get("tls", {})}
+    merged["tls"]        = {**defaults["tls"],        **user.get("tls",        {})}
+    merged["rate_limit"] = {**defaults["rate_limit"], **user.get("rate_limit", {})}
+    merged["audit"]      = {**defaults["audit"],      **user.get("audit",      {})}
     return merged
 
 
@@ -105,7 +117,20 @@ def build_grpc_server(config: dict, session_factory) -> grpc.Server:
         ],
     )
 
-    servicer = RegistryServicer(session_factory, event_loop=loop)
+    rpm = config.get("rate_limit", {}).get("announce_per_minute", 30)
+    rate_limiter = RateLimiter(rate_per_minute=rpm)
+    log.info("Announce rate limit: %s req/min per peer per share",
+             rpm if rpm > 0 else "unlimited")
+
+    audit = make_audit_logger(config.get("audit", {}))
+    audit_cfg = config.get("audit", {})
+    log.info("Audit logging: %s",
+             audit_cfg.get("log_file", "audit.log")
+             if audit_cfg.get("enabled") else "disabled")
+
+    servicer = RegistryServicer(session_factory, event_loop=loop,
+                                rate_limiter=rate_limiter,
+                                audit=audit)
     pb_grpc.add_RegistryServiceServicer_to_server(servicer, server)
 
     addr = f"{config['host']}:{config['port']}"

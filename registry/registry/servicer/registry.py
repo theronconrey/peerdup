@@ -9,6 +9,8 @@ handles offloading to a thread pool so the event loop stays free.
 import asyncio
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import grpc
@@ -29,12 +31,65 @@ from registry.db.models import (
     ShareModel,
     SharePeerModel,
 )
+from registry.audit import make_audit_logger
 from registry.events import event_bus
 from registry.ttl import TTL_MAX_SECONDS, TTL_MIN_SECONDS, clamp_ttl
 
 log = logging.getLogger(__name__)
 
 VERSION = "0.1.0"
+
+
+class RateLimiter:
+    """
+    Thread-safe token bucket rate limiter keyed by (peer_id, share_id).
+
+    Each key gets its own bucket. Buckets are lazily created and never
+    deleted — the number of active (peer_id, share_id) pairs is bounded
+    by the registry's share membership, so unbounded growth is not a concern.
+
+    Args:
+        rate_per_minute: Sustained announce rate allowed per key.
+                         0 disables limiting entirely.
+        burst:           Maximum burst size (tokens above steady-state).
+                         Defaults to rate_per_minute (one minute of credit).
+    """
+
+    def __init__(self, rate_per_minute: int, burst: int | None = None) -> None:
+        self._rpm   = rate_per_minute
+        self._burst = burst if burst is not None else rate_per_minute
+        self._lock  = threading.Lock()
+        self._buckets: dict[tuple[str, str], tuple[float, float]] = {}
+        # bucket value: (tokens, last_refill_time)
+
+    def is_allowed(self, peer_id: str, share_id: str) -> tuple[bool, float]:
+        """
+        Check if the (peer_id, share_id) pair is within rate limits.
+
+        Returns:
+            (allowed, retry_after_seconds)
+            retry_after_seconds is 0.0 when allowed is True.
+        """
+        if self._rpm == 0:
+            return True, 0.0
+
+        key = (peer_id, share_id)
+        now = time.monotonic()
+        rate_per_sec = self._rpm / 60.0
+
+        with self._lock:
+            tokens, last = self._buckets.get(key, (float(self._burst), now))
+            # Refill tokens based on elapsed time.
+            elapsed = now - last
+            tokens  = min(self._burst, tokens + elapsed * rate_per_sec)
+            if tokens >= 1.0:
+                self._buckets[key] = (tokens - 1.0, now)
+                return True, 0.0
+            else:
+                # Don't update last — no refill credit consumed.
+                self._buckets[key] = (tokens, last)
+                retry_after = (1.0 - tokens) / rate_per_sec
+                return False, retry_after
 
 
 def _now() -> datetime:
@@ -102,9 +157,13 @@ def _build_share_peer(membership, ann, pb, Timestamp) -> object:
 
 class RegistryServicer:
     def __init__(self, session_factory,
-                 event_loop: asyncio.AbstractEventLoop | None = None):
-        self._sf   = session_factory
-        self._loop = event_loop   # running loop shared by publish + drain
+                 event_loop: asyncio.AbstractEventLoop | None = None,
+                 rate_limiter: RateLimiter | None = None,
+                 audit=None):
+        self._sf           = session_factory
+        self._loop         = event_loop   # running loop shared by publish + drain
+        self._rate_limiter = rate_limiter or RateLimiter(rate_per_minute=0)  # 0 = disabled
+        self._audit        = audit or make_audit_logger({"enabled": False})
 
         # Lazy-import generated stubs so this module can be read
         # before code generation has run.
@@ -132,27 +191,37 @@ class RegistryServicer:
         """Abort with UNAUTHENTICATED if bearer token missing/invalid."""
         peer_id = self._authenticated_peer(context)
         if not peer_id:
+            self._audit.log("auth_failure", "", "denied",
+                            remote_ip=_remote_ip(context))
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Valid bearer token required")
         return peer_id
 
-    def _require_share_member(self, context, share_id: str, caller_id: str):
+    def _require_share_member(self, context, share_id: str, caller_id: str,
+                              action: str = ""):
         """Abort with PERMISSION_DENIED if caller is not a member of the share."""
         with self._sf() as session:
             m = session.query(SharePeerModel).filter_by(
                 share_id=share_id, peer_id=caller_id
             ).first()
             if not m:
+                self._audit.log(action, caller_id, "denied",
+                                share_id=share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.PERMISSION_DENIED,
                               "Not a member of this share")
             return m
 
-    def _require_share_owner(self, context, share_id: str, caller_id: str):
+    def _require_share_owner(self, context, share_id: str, caller_id: str,
+                             action: str = ""):
         """Abort with PERMISSION_DENIED if caller is not the share owner."""
         with self._sf() as session:
             share = session.query(ShareModel).filter_by(share_id=share_id).first()
             if not share:
+                self._audit.log(action, caller_id, "denied",
+                                share_id=share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.NOT_FOUND, "Share not found")
             if share.owner_id != caller_id:
+                self._audit.log(action, caller_id, "denied",
+                                share_id=share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.PERMISSION_DENIED,
                               "Only the share owner can perform this action")
             return share
@@ -163,6 +232,8 @@ class RegistryServicer:
         pb, Timestamp = self._pb, self._Timestamp
 
         if not verify_register_peer(request.peer_id, request.name, request.signature):
+            self._audit.log("register_peer", request.peer_id, "denied",
+                            remote_ip=_remote_ip(context))
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid signature")
 
         token = generate_token()
@@ -193,13 +264,15 @@ class RegistryServicer:
             )
 
         log.info("RegisterPeer peer_id=%s name=%s", request.peer_id, request.name)
+        self._audit.log("register_peer", request.peer_id, "ok",
+                        remote_ip=_remote_ip(context))
         return pb.RegisterPeerResponse(peer=peer_proto, token=token)
 
     # ── GetPeer ───────────────────────────────────────────────────────────────
 
     def GetPeer(self, request, context):
         pb, Timestamp = self._pb, self._Timestamp
-        self._require_auth(context)
+        caller_id = self._require_auth(context)
 
         with self._sf() as session:
             peer = session.query(PeerModel).filter_by(
@@ -227,6 +300,8 @@ class RegistryServicer:
                 except Exception:
                     pass
 
+            self._audit.log("get_peer", caller_id, "ok",
+                            remote_ip=_remote_ip(context))
             return pb.GetPeerResponse(peer=pb.Peer(
                 peer_id   = peer.peer_id,
                 name      = peer.name,
@@ -243,12 +318,16 @@ class RegistryServicer:
 
         if not verify_create_share(caller_id, request.share_id,
                                    request.name, request.signature):
+            self._audit.log("create_share", caller_id, "denied",
+                            share_id=request.share_id, remote_ip=_remote_ip(context))
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid signature")
 
         with self._sf() as session:
             if session.query(ShareModel).filter_by(
                 share_id=request.share_id
             ).first():
+                self._audit.log("create_share", caller_id, "denied",
+                                share_id=request.share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.ALREADY_EXISTS, "Share already exists")
 
             share = ShareModel(
@@ -275,6 +354,8 @@ class RegistryServicer:
             )
 
         log.info("CreateShare share_id=%s owner=%s", request.share_id, caller_id)
+        self._audit.log("create_share", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
         return pb.CreateShareResponse(share=share_proto)
 
     # ── GetShare ──────────────────────────────────────────────────────────────
@@ -294,6 +375,8 @@ class RegistryServicer:
             if not session.query(SharePeerModel).filter_by(
                 share_id=request.share_id, peer_id=caller_id
             ).first():
+                self._audit.log("get_share", caller_id, "denied",
+                                share_id=request.share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.PERMISSION_DENIED,
                               "Not a member of this share")
 
@@ -306,6 +389,8 @@ class RegistryServicer:
                 )
                 members.append(_build_share_peer(m, ann, pb, Timestamp))
 
+            self._audit.log("get_share", caller_id, "ok",
+                            share_id=request.share_id, remote_ip=_remote_ip(context))
             return pb.GetShareResponse(share=pb.Share(
                 share_id   = share.share_id,
                 name       = share.name,
@@ -319,7 +404,8 @@ class RegistryServicer:
     def AddPeerToShare(self, request, context):
         pb, Timestamp = self._pb, self._Timestamp
         caller_id = self._require_auth(context)
-        self._require_share_owner(context, request.share_id, caller_id)
+        self._require_share_owner(context, request.share_id, caller_id,
+                                  action="add_peer_to_share")
 
         with self._sf() as session:
             if not session.query(PeerModel).filter_by(
@@ -358,6 +444,8 @@ class RegistryServicer:
         self._publish_updated(request.share_id, request.peer_id)
 
         log.info("AddPeerToShare share=%s peer=%s", request.share_id, request.peer_id)
+        self._audit.log("add_peer_to_share", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
         return pb.AddPeerToShareResponse(share=pb.Share(
             share_id = request.share_id,
             name     = share.name,
@@ -370,7 +458,8 @@ class RegistryServicer:
     def RemovePeerFromShare(self, request, context):
         pb = self._pb
         caller_id = self._require_auth(context)
-        self._require_share_owner(context, request.share_id, caller_id)
+        self._require_share_owner(context, request.share_id, caller_id,
+                                  action="remove_peer_from_share")
 
         if request.peer_id == caller_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
@@ -404,6 +493,8 @@ class RegistryServicer:
 
         log.info("RemovePeerFromShare share=%s peer=%s",
                  request.share_id, request.peer_id)
+        self._audit.log("remove_peer_from_share", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
         return pb.RemovePeerFromShareResponse()
 
     # ── Announce ──────────────────────────────────────────────────────────────
@@ -413,12 +504,16 @@ class RegistryServicer:
         caller_id = self._require_auth(context)
 
         if caller_id != request.peer_id:
+            self._audit.log("announce", caller_id, "denied",
+                            share_id=request.share_id, remote_ip=_remote_ip(context))
             context.abort(grpc.StatusCode.PERMISSION_DENIED,
                           "peer_id in request must match authenticated peer")
 
         if not verify_announce(request.peer_id, request.share_id,
                                request.internal_addrs, request.ttl_seconds,
                                request.signature):
+            self._audit.log("announce", caller_id, "denied",
+                            share_id=request.share_id, remote_ip=_remote_ip(context))
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid announce signature")
 
         # Must be a member of the share.
@@ -426,8 +521,22 @@ class RegistryServicer:
             if not session.query(SharePeerModel).filter_by(
                 share_id=request.share_id, peer_id=request.peer_id
             ).first():
+                self._audit.log("announce", caller_id, "denied",
+                                share_id=request.share_id, remote_ip=_remote_ip(context))
                 context.abort(grpc.StatusCode.PERMISSION_DENIED,
                               "Not a member of this share")
+
+        # Rate limit check — after auth/membership, before DB write.
+        allowed, retry_after = self._rate_limiter.is_allowed(
+            request.peer_id, request.share_id
+        )
+        if not allowed:
+            self._audit.log("announce", caller_id, "denied",
+                            share_id=request.share_id, remote_ip=_remote_ip(context))
+            context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"Announce rate limit exceeded. Retry after {retry_after:.1f}s",
+            )
 
         # Extract caller's external IP from gRPC peer info.
         peer_info = context.peer()  # e.g. "ipv4:1.2.3.4:54321"
@@ -494,6 +603,8 @@ class RegistryServicer:
 
         log.info("Announce peer=%s share=%s ttl=%ds ext=%s:%s",
                  request.peer_id, request.share_id, ttl, ext_host, ext_port)
+        self._audit.log("announce", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
 
         return pb.AnnounceResponse(
             observed_external=pb.PeerAddress(
@@ -507,7 +618,8 @@ class RegistryServicer:
     def GetSharePeers(self, request, context):
         pb, Timestamp = self._pb, self._Timestamp
         caller_id = self._require_auth(context)
-        self._require_share_member(context, request.share_id, caller_id)
+        self._require_share_member(context, request.share_id, caller_id,
+                                   action="get_share_peers")
 
         with self._sf() as session:
             share = session.query(ShareModel).filter_by(
@@ -526,6 +638,8 @@ class RegistryServicer:
                     continue
                 peers.append(sp)
 
+        self._audit.log("get_share_peers", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
         return pb.GetSharePeersResponse(peers=peers)
 
     # ── WatchSharePeers (server-streaming) ────────────────────────────────────
@@ -542,7 +656,10 @@ class RegistryServicer:
         """
         pb, Timestamp = self._pb, self._Timestamp
         caller_id = self._require_auth(context)
-        self._require_share_member(context, request.share_id, caller_id)
+        self._require_share_member(context, request.share_id, caller_id,
+                                   action="watch_share_peers")
+        self._audit.log("watch_share_peers", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
 
         import asyncio
         import queue
@@ -649,6 +766,12 @@ class RegistryServicer:
     def _publish_updated(self, share_id: str, peer_id: str):
         """Fire an UPDATED event for a peer (used after ACL changes)."""
         pass  # Extended in future — ACL change notification.
+
+
+def _remote_ip(context) -> str:
+    """Return just the host portion of the gRPC peer string."""
+    host, _ = _parse_peer_addr(context.peer() or "")
+    return host or ""
 
 
 def _parse_peer_addr(peer_str: str) -> tuple[str | None, int | None]:
