@@ -164,8 +164,28 @@ message PeerEvent {
 message HealthRequest {}
 
 message HealthResponse {
-  string status  = 1;  // "ok"
-  string version = 2;
+  string status           = 1;  // "ok" | "degraded" | "error"
+  string version          = 2;
+  int64  uptime_s         = 3;  // seconds since server start
+  int32  peers_registered = 4;
+  int32  shares_registered = 5;
+  int32  peers_online_now = 6;  // with non-expired announcements
+  bool   db_ok            = 7;  // false if DB query failed
+  bool   ttl_sweep_ok     = 8;  // false if sweep loop hasn't run in > 2x interval
+}
+
+// ── Share activity ────────────────────────────────────────────────────────────
+
+message GetShareActivityRequest {
+  string share_id = 1;
+}
+
+message GetShareActivityResponse {
+  string share_id               = 1;
+  int32  peers_online           = 2;
+  int32  announce_rate_per_hour = 3;  // approximate - based on recent announces
+  int32  peak_peers_24h         = 4;
+  string last_announce_at       = 5;  // ISO-8601, empty if no announces
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -188,4 +208,7 @@ service RegistryService {
 
   // Health
   rpc Health              (HealthRequest)              returns (HealthResponse);
+
+  // Share activity
+  rpc GetShareActivity    (GetShareActivityRequest)    returns (GetShareActivityResponse);
 }

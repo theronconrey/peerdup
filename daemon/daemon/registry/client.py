@@ -84,11 +84,28 @@ class RegistryClient:
         self._token: str | None = None
         self._channel = None
         self._stub    = None
+        self._last_rpc_ok_at: float | None = None  # monotonic timestamp
 
     @property
     def is_configured(self) -> bool:
         """True when a registry address has been set."""
         return bool(self._address)
+
+    @property
+    def address(self) -> str:
+        return self._address
+
+    @property
+    def tls_enabled(self) -> bool:
+        return self._tls
+
+    @property
+    def ca_file(self) -> str | None:
+        return self._ca_file
+
+    @property
+    def mtls_configured(self) -> bool:
+        return bool(self._cert_file and self._key_file)
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -146,6 +163,7 @@ class RegistryClient:
             signature = signature,
         ))
         self._token = resp.token
+        self._last_rpc_ok_at = time.monotonic()
         log.info("Registered peer_id=%s", peer_id)
         return resp.token
 
@@ -238,9 +256,32 @@ class RegistryClient:
         try:
             from daemon import registry_pb2 as pb  # type: ignore
             resp = self._stub.Health(pb.HealthRequest())
+            self._last_rpc_ok_at = time.monotonic()
             return resp.status == "ok"
         except grpc.RpcError:
             return False
+
+    def health_detail(self) -> dict:
+        """Return detailed health info from the registry Health RPC."""
+        from daemon import registry_pb2 as pb  # type: ignore
+        resp = self._stub.Health(pb.HealthRequest())
+        self._last_rpc_ok_at = time.monotonic()
+        return {
+            "status":           resp.status,
+            "version":          resp.version,
+            "uptime_s":         resp.uptime_s,
+            "peers_registered": resp.peers_registered,
+            "shares_registered": resp.shares_registered,
+            "peers_online_now": resp.peers_online_now,
+            "db_ok":            resp.db_ok,
+            "ttl_sweep_ok":     resp.ttl_sweep_ok,
+        }
+
+    def last_rpc_ok_ago_s(self) -> int:
+        """Seconds since last successful RPC. Returns -1 if never."""
+        if self._last_rpc_ok_at is None:
+            return -1
+        return int(time.monotonic() - self._last_rpc_ok_at)
 
 
 # ── Watch loop with reconnect ─────────────────────────────────────────────────

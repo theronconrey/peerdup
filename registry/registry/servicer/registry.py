@@ -159,11 +159,20 @@ class RegistryServicer:
     def __init__(self, session_factory,
                  event_loop: asyncio.AbstractEventLoop | None = None,
                  rate_limiter: RateLimiter | None = None,
-                 audit=None):
+                 audit=None,
+                 metrics=None):
         self._sf           = session_factory
         self._loop         = event_loop   # running loop shared by publish + drain
         self._rate_limiter = rate_limiter or RateLimiter(rate_per_minute=0)  # 0 = disabled
         self._audit        = audit or make_audit_logger({"enabled": False})
+        self._metrics      = metrics  # MetricsCollector or None
+
+        # Health tracking fields.
+        self._start_time:    float       = time.monotonic()
+        self._last_sweep_at: float | None = None
+
+        # Active WatchSharePeers stream counter.
+        self._active_watches: int = 0
 
         # Lazy-import generated stubs so this module can be read
         # before code generation has run.
@@ -173,6 +182,12 @@ class RegistryServicer:
         self._pb        = pb
         self._pb_grpc   = pb_grpc
         self._Timestamp = Timestamp
+
+    def record_sweep(self, duration_s: float = 0.0) -> None:
+        """Called by ttl_sweep_loop after each successful sweep."""
+        self._last_sweep_at = time.monotonic()
+        if self._metrics is not None:
+            self._metrics.record_sweep(duration_s)
 
     # ── Auth helper ───────────────────────────────────────────────────────────
 
@@ -501,6 +516,7 @@ class RegistryServicer:
 
     def Announce(self, request, context):
         pb, Timestamp = self._pb, self._Timestamp
+        _rpc_start = time.monotonic()
         caller_id = self._require_auth(context)
 
         if caller_id != request.peer_id:
@@ -606,6 +622,10 @@ class RegistryServicer:
         self._audit.log("announce", caller_id, "ok",
                         share_id=request.share_id, remote_ip=_remote_ip(context))
 
+        if self._metrics is not None:
+            self._metrics.record_announce(request.share_id)
+            self._metrics.record_rpc("Announce", "ok", time.monotonic() - _rpc_start)
+
         return pb.AnnounceResponse(
             observed_external=pb.PeerAddress(
                 host=ext_host or "", port=ext_port or 0, is_lan=False
@@ -660,6 +680,10 @@ class RegistryServicer:
                                    action="watch_share_peers")
         self._audit.log("watch_share_peers", caller_id, "ok",
                         share_id=request.share_id, remote_ip=_remote_ip(context))
+
+        self._active_watches += 1
+        if self._metrics is not None:
+            self._metrics.set_active_watches(self._active_watches)
 
         import asyncio
         import queue
@@ -742,11 +766,135 @@ class RegistryServicer:
             if own_loop is not None:
                 own_loop.call_soon_threadsafe(own_loop.stop)
                 t.join(timeout=5)
+            self._active_watches -= 1
+            if self._metrics is not None:
+                self._metrics.set_active_watches(self._active_watches)
 
     # ── Health ────────────────────────────────────────────────────────────────
 
     def Health(self, request, context):
-        return self._pb.HealthResponse(status="ok", version=VERSION)
+        from registry.ttl import TTL_SWEEP_INTERVAL_SECONDS
+        pb = self._pb
+
+        start = time.monotonic()
+        uptime_s = int(time.monotonic() - self._start_time)
+
+        # DB health check.
+        peers_registered  = 0
+        shares_registered = 0
+        peers_online_now  = 0
+        db_ok = False
+        try:
+            with self._sf() as session:
+                peers_registered  = session.query(PeerModel).count()
+                shares_registered = session.query(ShareModel).count()
+                # Count distinct peer_ids with a non-expired announcement.
+                now = _now()
+                online_ids = (
+                    session.query(AnnouncementModel.peer_id)
+                    .filter(AnnouncementModel.expires_at > now)
+                    .distinct()
+                    .all()
+                )
+                peers_online_now = len(online_ids)
+            db_ok = True
+        except Exception:
+            log.exception("Health: DB query failed")
+
+        # TTL sweep health check.
+        # Consider the sweep healthy if it has run within 2x the sweep interval.
+        # If no sweep has run yet, allow a grace period of 2x the interval from
+        # startup before declaring it unhealthy.
+        max_gap = 2 * TTL_SWEEP_INTERVAL_SECONDS
+        if self._last_sweep_at is not None:
+            ttl_sweep_ok = (time.monotonic() - self._last_sweep_at) <= max_gap
+        else:
+            # No sweep recorded - healthy during initial startup grace period.
+            ttl_sweep_ok = (time.monotonic() - self._start_time) <= max_gap
+
+        if db_ok and ttl_sweep_ok:
+            status = "ok"
+        elif db_ok or ttl_sweep_ok:
+            status = "degraded"
+        else:
+            status = "error"
+
+        self._audit.log("health", "", "ok")
+
+        if self._metrics is not None:
+            elapsed = time.monotonic() - start
+            self._metrics.record_rpc("Health", "ok", elapsed)
+
+        return pb.HealthResponse(
+            status            = status,
+            version           = VERSION,
+            uptime_s          = uptime_s,
+            peers_registered  = peers_registered,
+            shares_registered = shares_registered,
+            peers_online_now  = peers_online_now,
+            db_ok             = db_ok,
+            ttl_sweep_ok      = ttl_sweep_ok,
+        )
+
+    # ── GetShareActivity ──────────────────────────────────────────────────────
+
+    def GetShareActivity(self, request, context):
+        pb = self._pb
+        start = time.monotonic()
+        caller_id = self._require_auth(context)
+        self._require_share_owner(context, request.share_id, caller_id,
+                                  action="get_share_activity")
+
+        with self._sf() as session:
+            now = _now()
+
+            # Count online peers for this share.
+            online_anns = (
+                session.query(AnnouncementModel)
+                .filter(
+                    AnnouncementModel.share_id == request.share_id,
+                    AnnouncementModel.expires_at > now,
+                )
+                .all()
+            )
+            peers_online = len(online_anns)
+
+            # Most recent announce timestamp across all peers for this share.
+            latest_ann = (
+                session.query(AnnouncementModel)
+                .filter(AnnouncementModel.share_id == request.share_id)
+                .order_by(AnnouncementModel.announced_at.desc())
+                .first()
+            )
+            if latest_ann and latest_ann.announced_at:
+                dt = latest_ann.announced_at
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                last_announce_at = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                last_announce_at = ""
+
+        # announce_rate_per_hour and peak_peers_24h require time-series data
+        # that is not currently stored. Return 0 as stubs.
+        announce_rate_per_hour = 0
+        peak_peers_24h         = 0
+
+        log.info("GetShareActivity share=%s peers_online=%d",
+                 request.share_id, peers_online)
+        self._audit.log("get_share_activity", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
+
+        if self._metrics is not None:
+            elapsed = time.monotonic() - start
+            self._metrics.record_rpc("GetShareActivity", "ok", elapsed)
+
+        return pb.GetShareActivityResponse(
+            share_id               = request.share_id,
+            peers_online           = peers_online,
+            announce_rate_per_hour = announce_rate_per_hour,
+            peak_peers_24h         = peak_peers_24h,
+            last_announce_at       = last_announce_at,
+        )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

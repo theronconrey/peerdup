@@ -25,10 +25,15 @@ def clamp_ttl(requested: int) -> int:
     return max(TTL_MIN_SECONDS, min(TTL_MAX_SECONDS, requested))
 
 
-async def ttl_sweep_loop(session_factory):
+async def ttl_sweep_loop(session_factory, on_sweep_complete=None):
     """
     Continuously sweeps for expired announcements and fires OFFLINE events.
     Intended to run as an asyncio background task for the lifetime of the server.
+
+    Args:
+        session_factory:    SQLAlchemy session factory.
+        on_sweep_complete:  Optional callable invoked after each successful sweep.
+                            Used by RegistryServicer.record_sweep() to track health.
     """
     # Import proto here to avoid import-time dependency before stubs are generated.
     from registry_pb2 import PeerEvent, SharePeer, PeerAddress  # type: ignore
@@ -36,8 +41,12 @@ async def ttl_sweep_loop(session_factory):
 
     while True:
         await asyncio.sleep(TTL_SWEEP_INTERVAL_SECONDS)
+        t0 = asyncio.get_event_loop().time()
         try:
             await _sweep(session_factory, PeerEvent, SharePeer, PeerAddress, Timestamp)
+            duration_s = asyncio.get_event_loop().time() - t0
+            if on_sweep_complete is not None:
+                on_sweep_complete(duration_s)
         except Exception:
             log.exception("TTL sweep failed")
 

@@ -98,8 +98,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
     if [ -n "$REGISTRY_ADDRESS" ]; then
         TLS_ENABLED="true"
+
+        printf '\n'
+        printf 'Optional: mTLS certificate paths\n'
+        printf '(Leave blank to skip - only needed if your registry requires client certificates)\n\n'
+        prompt_optional CA_FILE "CA certificate file for verifying registry (e.g. /etc/peerdup/ca.crt)"
+        prompt_optional CERT_FILE "Client certificate file for mTLS (e.g. /etc/peerdup/client.crt)"
+        if [ -n "$CERT_FILE" ]; then
+            prompt_optional KEY_FILE "Client private key file for mTLS (e.g. /etc/peerdup/client.key)"
+        else
+            KEY_FILE=""
+        fi
     else
         TLS_ENABLED="false"
+        CA_FILE=""
+        CERT_FILE=""
+        KEY_FILE=""
     fi
 
     printf '\n'
@@ -162,6 +176,19 @@ enabled = false"
         REGISTRY_LINE="address = \"$REGISTRY_ADDRESS\""
     fi
 
+    REGISTRY_CA_LINE=""
+    REGISTRY_CERT_LINE=""
+    REGISTRY_KEY_LINE=""
+    if [ -n "$CA_FILE" ]; then
+        REGISTRY_CA_LINE="ca_file   = \"$CA_FILE\""
+    fi
+    if [ -n "$CERT_FILE" ]; then
+        REGISTRY_CERT_LINE="cert_file = \"$CERT_FILE\""
+    fi
+    if [ -n "$KEY_FILE" ]; then
+        REGISTRY_KEY_LINE="key_file  = \"$KEY_FILE\""
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 [daemon]
 name        = "$PEER_NAME"
@@ -170,6 +197,9 @@ listen_port = $LISTEN_PORT
 [registry]
 $REGISTRY_LINE
 tls     = $TLS_ENABLED
+$REGISTRY_CA_LINE
+$REGISTRY_CERT_LINE
+$REGISTRY_KEY_LINE
 
 [identity]
 name = "$PEER_NAME"
@@ -279,7 +309,7 @@ ok "peerdup-daemon enabled and started via systemd."
 printf '\n'
 printf 'Enable auto-start at boot (before login)?\n'
 printf 'Recommended for NAS or always-on machines. Optional for laptops.\n'
-prompt_yn ENABLE_LINGER "Enable linger for %s" "n"
+prompt_yn ENABLE_LINGER "Enable linger for $USER (start at boot without login)" "n"
 
 if [ "$ENABLE_LINGER" = "true" ]; then
     loginctl enable-linger "$USER"

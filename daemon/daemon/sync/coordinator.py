@@ -658,6 +658,36 @@ class SyncCoordinator:
             ))
         return result
 
+    # -- Registry health / status (proxied to ControlService) -----------------
+
+    async def registry_health(self) -> dict:
+        """Probe the registry Health RPC and return a status dict."""
+        if not self._registry.is_configured:
+            return {"status": "not_configured"}
+        try:
+            return self._registry.health_detail()
+        except Exception as e:
+            return {"status": "unreachable", "error_message": str(e)}
+
+    async def registry_status(self) -> dict:
+        """Return the daemon's current registry connection info."""
+        if not self._registry.is_configured:
+            connection_state = "not_configured"
+        elif self._registry._token:
+            connection_state = "connected"
+        else:
+            connection_state = "disconnected"
+
+        return {
+            "registry_address":  self._registry.address or "",
+            "tls_enabled":       self._registry.tls_enabled,
+            "ca_file":           self._registry.ca_file or "",
+            "mtls_configured":   self._registry.mtls_configured,
+            "connection_state":  connection_state,
+            "last_rpc_ok_ago_s": self._registry.last_rpc_ok_ago_s(),
+            "token_valid":       bool(self._registry._token),
+        }
+
     # -- Internal activation --------------------------------------------------
 
     async def _activate_share(self, share_id: str, local_path: str):
@@ -962,6 +992,17 @@ class SyncCoordinator:
             for s in self._db.list_shares()
             if s.state != ShareState.PAUSED
         ]
+
+    def global_rates(self) -> tuple[int, int]:
+        """Return (upload_bytes_per_sec, download_bytes_per_sec) summed across all shares."""
+        up = 0
+        down = 0
+        for share in self._db.list_shares():
+            lt_status = self._lt.get_status(share.share_id)
+            if lt_status:
+                up   += lt_status.upload_rate   or 0
+                down += lt_status.download_rate or 0
+        return up, down
 
     # -- Helpers --------------------------------------------------------------
 

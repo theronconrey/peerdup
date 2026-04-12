@@ -20,6 +20,7 @@ import grpc
 
 from registry.audit import make_audit_logger
 from registry.db.models import create_tables, make_engine, make_session_factory
+from registry.metrics import MetricsCollector, start_metrics_server
 from registry.servicer.registry import RegistryServicer, RateLimiter
 from registry.ttl import ttl_sweep_loop
 
@@ -47,6 +48,10 @@ def load_config(path: str | None) -> dict:
             "max_bytes":    10 * 1024 * 1024,  # 10 MB
             "backup_count": 5,
         },
+        "metrics": {
+            "enabled": False,
+            "port":    9090,
+        },
         "log_level": "INFO",
         "max_workers": 10,
     }
@@ -71,6 +76,7 @@ def load_config(path: str | None) -> dict:
     merged["tls"]        = {**defaults["tls"],        **user.get("tls",        {})}
     merged["rate_limit"] = {**defaults["rate_limit"], **user.get("rate_limit", {})}
     merged["audit"]      = {**defaults["audit"],      **user.get("audit",      {})}
+    merged["metrics"]    = {**defaults["metrics"],    **user.get("metrics",    {})}
     return merged
 
 
@@ -97,7 +103,14 @@ def build_server_credentials(tls_cfg: dict):
     )
 
 
-def build_grpc_server(config: dict, session_factory) -> grpc.Server:
+def build_grpc_server(config: dict, session_factory,
+                      metrics: MetricsCollector | None = None) -> tuple:
+    """
+    Build and return (grpc.Server, RegistryServicer).
+
+    The servicer is returned so the caller can wire record_sweep() into
+    the TTL sweep loop.
+    """
     import asyncio
     from registry import registry_pb2_grpc as pb_grpc  # type: ignore
 
@@ -130,7 +143,8 @@ def build_grpc_server(config: dict, session_factory) -> grpc.Server:
 
     servicer = RegistryServicer(session_factory, event_loop=loop,
                                 rate_limiter=rate_limiter,
-                                audit=audit)
+                                audit=audit,
+                                metrics=metrics)
     pb_grpc.add_RegistryServiceServicer_to_server(servicer, server)
 
     addr = f"{config['host']}:{config['port']}"
@@ -143,7 +157,7 @@ def build_grpc_server(config: dict, session_factory) -> grpc.Server:
         server.add_insecure_port(addr)
         log.warning("TLS disabled — use only on trusted networks or behind a proxy")
 
-    return server
+    return server, servicer
 
 
 async def serve(config: dict):
@@ -151,14 +165,23 @@ async def serve(config: dict):
     session_factory = make_session_factory(engine)
     create_tables(engine)
 
-    server = build_grpc_server(config, session_factory)
+    # Start Prometheus metrics server if enabled.
+    metrics_cfg = config.get("metrics", {})
+    metrics = None
+    if metrics_cfg.get("enabled"):
+        metrics = MetricsCollector()
+        start_metrics_server(metrics_cfg["port"])
+
+    server, servicer = build_grpc_server(config, session_factory, metrics=metrics)
     server.start()
 
     addr = f"{config['host']}:{config['port']}"
     log.info("Registry listening on %s", addr)
 
-    # Start TTL expiry background task.
-    sweep_task = asyncio.create_task(ttl_sweep_loop(session_factory))
+    # Start TTL expiry background task, wiring record_sweep for health tracking.
+    sweep_task = asyncio.create_task(
+        ttl_sweep_loop(session_factory, on_sweep_complete=servicer.record_sweep)
+    )
 
     # Graceful shutdown on SIGTERM / SIGINT.
     stop_event = asyncio.Event()

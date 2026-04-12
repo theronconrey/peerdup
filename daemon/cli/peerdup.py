@@ -22,6 +22,8 @@ Commands:
     share resolve <conflict_id> <keep-local|keep-remote>  Resolve a conflict
     status                                           Show current sync status
     watch                                            Stream live status events (Ctrl-C to stop)
+    registry health                                  Probe registry and show health metrics
+    registry status [--json]                         Show daemon registry connection info
 """
 
 from __future__ import annotations
@@ -431,14 +433,96 @@ def cmd_share_resolve(args):
         _err(e)
 
 
+def cmd_registry_health(args):
+    from daemon import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.RegistryHealth(control_pb2.RegistryHealthRequest())
+    except grpc.RpcError as e:
+        _err(e)
+        return
+
+    if resp.status == "not_configured":
+        print("No registry configured. Run: peerdup-setup")
+        return
+
+    if resp.status == "unreachable":
+        addr_line = ""
+        print(f"Registry: unreachable")
+        if resp.error_message:
+            print(f"Error:    {resp.error_message}")
+        return
+
+    up_d    = resp.uptime_s // 86400
+    up_h    = (resp.uptime_s % 86400) // 3600
+    up_str  = f"{up_d}d {up_h}h" if up_d else f"{up_h}h"
+    ver     = resp.version or "unknown"
+
+    print(f"Status:   {resp.status}  -  v{ver}  -  up {up_str}")
+    print(f"Peers:    {resp.peers_registered} registered  -  {resp.peers_online_now} online now")
+    print(f"Shares:   {resp.shares_registered} registered")
+    print(f"DB:       {'ok' if resp.db_ok else 'ERROR'}")
+    print(f"TTL sweep: {'ok' if resp.ttl_sweep_ok else 'ERROR'}")
+
+
+def cmd_registry_status(args):
+    from daemon import control_pb2  # type: ignore
+    stub = _stub(args.socket)
+    try:
+        resp = stub.RegistryStatus(control_pb2.RegistryStatusRequest())
+    except grpc.RpcError as e:
+        _err(e)
+        return
+
+    if getattr(args, 'json', False):
+        import json
+        print(json.dumps({
+            "connection_state":  resp.connection_state,
+            "registry_address":  resp.registry_address,
+            "tls_enabled":       resp.tls_enabled,
+        }))
+        return
+
+    if not resp.registry_address:
+        print("No registry configured. Run: peerdup-setup")
+        return
+
+    tls_str  = "enabled" if resp.tls_enabled else "disabled"
+    ca_str   = resp.ca_file or "(system CA)"
+    mtls_str = "configured" if resp.mtls_configured else "not configured"
+    conn     = resp.connection_state
+
+    if resp.last_rpc_ok_ago_s >= 0:
+        conn_detail = f"{conn}  (last successful RPC: {resp.last_rpc_ok_ago_s}s ago)"
+    else:
+        conn_detail = f"{conn}  (never)"
+
+    print(f"Registry address:  {resp.registry_address}")
+    print(f"TLS:               {tls_str}")
+    print(f"CA file:           {ca_str}")
+    print(f"mTLS client cert:  {mtls_str}")
+    print(f"Connection:        {conn_detail}")
+    print(f"Token:             {'valid' if resp.token_valid else 'not set'}")
+
+
 def cmd_status(args):
     from daemon import control_pb2  # type: ignore
     stub = _stub(args.socket)
     try:
         resp = stub.Status(control_pb2.StatusRequest())
-        print(resp.message)
-        if resp.HasField("share"):
-            _print_shares([resp.share])
+        shares = stub.ListShares(control_pb2.ListSharesRequest()).shares
+        active = len(shares)
+        print(f"Sync status  [{active} share{'s' if active != 1 else ''} active]")
+        if resp.global_upload_rate or resp.global_download_rate:
+            print("-" * 40)
+            print(f"Global:  "
+                  f"up {_human(resp.global_upload_rate)}/s  "
+                  f"down {_human(resp.global_download_rate)}/s")
+        if shares:
+            print("-" * 40)
+            _print_shares(shares)
+        else:
+            print(resp.message)
     except grpc.RpcError as e:
         _err(e)
 
@@ -493,6 +577,8 @@ def _print_event_json(event):
     obj = {
         'type':    type_map.get(event.type, 'unknown'),
         'message': event.message,
+        'global_upload_rate':   event.global_upload_rate,
+        'global_download_rate': event.global_download_rate,
     }
     if event.conflict_id:
         obj['conflict_id'] = event.conflict_id
@@ -748,6 +834,16 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.add_argument("--json", action="store_true", default=False,
                          help="Output machine-readable newline-delimited JSON")
 
+    # registry subcommands
+    reg_p   = sub.add_parser("registry", help="Registry health and connection status")
+    reg_sub = reg_p.add_subparsers(dest="registry_command", required=True)
+
+    reg_sub.add_parser("health", help="Probe the registry and show health metrics")
+
+    reg_status_p = reg_sub.add_parser("status", help="Show daemon registry connection info")
+    reg_status_p.add_argument("--json", action="store_true", default=False,
+                              help="Output machine-readable JSON")
+
     return p
 
 
@@ -781,6 +877,12 @@ def main():
             "resolve":      cmd_share_resolve,
         }
         share_dispatch[args.share_command](args)
+    elif args.command == "registry":
+        registry_dispatch = {
+            "health": cmd_registry_health,
+            "status": cmd_registry_status,
+        }
+        registry_dispatch[args.registry_command](args)
     else:
         parser.print_help()
         sys.exit(1)

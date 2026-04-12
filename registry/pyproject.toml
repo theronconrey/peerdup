@@ -27,7 +27,8 @@ dev = [
 ]
 
 [project.scripts]
-peerdup-registry = "registry.server:main"
+peerdup-registry       = "registry.server:main"
+peerdup-registry-admin = "registry.cli.admin:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

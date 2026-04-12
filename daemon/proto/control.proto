@@ -71,10 +71,12 @@ message StatusEvent {
     EVENT_TYPE_ERROR        = 4;  // non-fatal error
     EVENT_TYPE_CONFLICT     = 5;  // conflict detected (ask strategy)
   }
-  EventType   type        = 1;
-  ShareStatus share       = 2;  // populated for SHARE_UPDATED / SYNC_PROGRESS
-  string      message     = 3;  // human-readable detail
-  int32       conflict_id = 4;  // populated for CONFLICT events
+  EventType   type               = 1;
+  ShareStatus share              = 2;  // populated for SHARE_UPDATED / SYNC_PROGRESS
+  string      message            = 3;  // human-readable detail
+  int32       conflict_id        = 4;  // populated for CONFLICT events
+  int32       global_upload_rate = 5;  // bytes/sec aggregate across all shares
+  int32       global_download_rate = 6;  // bytes/sec aggregate across all shares
 }
 
 // ── Conflict strategy ─────────────────────────────────────────────────────────
@@ -212,6 +214,34 @@ message GetShareInfoResponse {
   int32  pending_conflicts = 18;  // number of unresolved conflicts (ask strategy only)
 }
 
+// ── Registry health / status ─────────────────────────────────────────────────
+
+message RegistryHealthRequest {}
+
+message RegistryHealthResponse {
+  string status             = 1;  // "ok" | "degraded" | "error" | "unreachable" | "not_configured"
+  string version            = 2;
+  int64  uptime_s           = 3;
+  int32  peers_registered   = 4;
+  int32  shares_registered  = 5;
+  int32  peers_online_now   = 6;
+  bool   db_ok              = 7;
+  bool   ttl_sweep_ok       = 8;
+  string error_message      = 9;  // populated if status == "unreachable"
+}
+
+message RegistryStatusRequest {}
+
+message RegistryStatusResponse {
+  string registry_address   = 1;  // empty if not configured
+  bool   tls_enabled        = 2;
+  string ca_file            = 3;  // empty if not configured
+  bool   mtls_configured    = 4;  // true if cert_file + key_file are set
+  string connection_state   = 5;  // "connected" | "disconnected" | "not_configured"
+  int64  last_rpc_ok_ago_s  = 6;  // seconds since last successful RPC; -1 if never
+  bool   token_valid        = 7;  // whether we have a valid bearer token
+}
+
 // ── Rate limits ───────────────────────────────────────────────────────────────
 
 message SetShareRateLimitRequest {
@@ -267,6 +297,10 @@ service ControlService {
 
   // Identity
   rpc ShowIdentity  (IdentityRequest)     returns (IdentityResponse);
+
+  // Registry health / connection status
+  rpc RegistryHealth (RegistryHealthRequest) returns (RegistryHealthResponse);
+  rpc RegistryStatus (RegistryStatusRequest) returns (RegistryStatusResponse);
 
   // Status
   rpc Status        (StatusRequest)       returns (StatusEvent);

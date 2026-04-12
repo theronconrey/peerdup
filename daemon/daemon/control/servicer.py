@@ -308,6 +308,42 @@ class ControlServicer:
             log.exception("RevokeAccess failed")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
+    # ── Registry health / status ──────────────────────────────────────────────
+
+    def RegistryHealth(self, request, context):
+        pb = self._pb
+        result = self._run_async(self._coord.registry_health())
+        if result.get("status") == "not_configured":
+            return pb.RegistryHealthResponse(status="not_configured")
+        if result.get("status") == "unreachable":
+            return pb.RegistryHealthResponse(
+                status        = "unreachable",
+                error_message = result.get("error_message", ""),
+            )
+        return pb.RegistryHealthResponse(
+            status           = result.get("status", "unknown"),
+            version          = result.get("version", ""),
+            uptime_s         = result.get("uptime_s", 0),
+            peers_registered = result.get("peers_registered", 0),
+            shares_registered = result.get("shares_registered", 0),
+            peers_online_now = result.get("peers_online_now", 0),
+            db_ok            = result.get("db_ok", False),
+            ttl_sweep_ok     = result.get("ttl_sweep_ok", False),
+        )
+
+    def RegistryStatus(self, request, context):
+        pb = self._pb
+        result = self._run_async(self._coord.registry_status())
+        return pb.RegistryStatusResponse(
+            registry_address  = result.get("registry_address", ""),
+            tls_enabled       = result.get("tls_enabled", False),
+            ca_file           = result.get("ca_file", ""),
+            mtls_configured   = result.get("mtls_configured", False),
+            connection_state  = result.get("connection_state", "not_configured"),
+            last_rpc_ok_ago_s = result.get("last_rpc_ok_ago_s", -1),
+            token_valid       = result.get("token_valid", False),
+        )
+
     # ── Identity ──────────────────────────────────────────────────────────────
 
     def ShowIdentity(self, request, context):
@@ -322,16 +358,21 @@ class ControlServicer:
     def Status(self, request, context):
         pb = self._pb
         shares = self._coord.list_shares()
+        up, down = self._coord.global_rates()
         if shares:
             s = shares[0]
             return pb.StatusEvent(
-                type    = pb.StatusEvent.EVENT_TYPE_SHARE_UPDATED,
-                share   = self._dict_to_proto(s),
-                message = f"{len(shares)} shares active",
+                type               = pb.StatusEvent.EVENT_TYPE_SHARE_UPDATED,
+                share              = self._dict_to_proto(s),
+                message            = f"{len(shares)} shares active",
+                global_upload_rate   = up,
+                global_download_rate = down,
             )
         return pb.StatusEvent(
-            type    = pb.StatusEvent.EVENT_TYPE_UNSPECIFIED,
-            message = "No active shares",
+            type               = pb.StatusEvent.EVENT_TYPE_UNSPECIFIED,
+            message            = "No active shares",
+            global_upload_rate   = up,
+            global_download_rate = down,
         )
 
     def WatchStatus(self, request, context):
@@ -407,8 +448,11 @@ class ControlServicer:
         }
         etype = type_map.get(d.get("type", ""),
                              pb.StatusEvent.EVENT_TYPE_UNSPECIFIED)
+        up, down = self._coord.global_rates()
         return pb.StatusEvent(
-            type        = etype,
-            message     = d.get("message", str(d)),
-            conflict_id = d.get("conflict_id", 0),
+            type               = etype,
+            message            = d.get("message", str(d)),
+            conflict_id        = d.get("conflict_id", 0),
+            global_upload_rate   = up,
+            global_download_rate = down,
         )

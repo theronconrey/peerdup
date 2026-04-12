@@ -44,20 +44,33 @@ export default class PeerDupExtension extends Extension {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     enable() {
-        this._shares         = new Map();   // share_id -> share dict
-        this._indicator      = null;
-        this._icon           = null;
-        this._pollTimerId    = null;
-        this._retryTimerId   = null;
-        this._watchProc      = null;
-        this._watchStream    = null;
-        this._watchCancel    = null;
+        this._shares             = new Map();   // share_id -> share dict
+        this._indicator          = null;
+        this._icon               = null;
+        this._rateLabel          = null;
+        this._pollTimerId        = null;
+        this._retryTimerId       = null;
+        this._watchProc          = null;
+        this._watchStream        = null;
+        this._watchCancel        = null;
+        this._registryStatus     = null;  // last registry status dict
+        this._registryMenuItem   = null;
 
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
 
+        // Panel button: icon + optional rate label side by side
+        const panelBox = new St.BoxLayout({style_class: 'panel-status-menu-box'});
         this._icon = new St.Icon({style_class: 'system-status-icon'});
         this._setIconState('error');
-        this._indicator.add_child(this._icon);
+        panelBox.add_child(this._icon);
+
+        this._rateLabel = new St.Label({
+            text:              '',
+            y_align:           1,  // CLUTTER_ACTOR_ALIGN_CENTER
+            style_class:       'peerdup-rate-label',
+        });
+        panelBox.add_child(this._rateLabel);
+        this._indicator.add_child(panelBox);
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
 
@@ -80,9 +93,12 @@ export default class PeerDupExtension extends Extension {
         }
         this._stopWatcher();
         this._indicator?.destroy();
-        this._indicator  = null;
-        this._icon       = null;
-        this._shares     = null;
+        this._indicator        = null;
+        this._icon             = null;
+        this._rateLabel        = null;
+        this._shares           = null;
+        this._registryStatus   = null;
+        this._registryMenuItem = null;
     }
 
     // ── Watcher subprocess ─────────────────────────────────────────────────
@@ -158,8 +174,20 @@ export default class PeerDupExtension extends Extension {
 
     // ── Event + poll handlers ──────────────────────────────────────────────
 
-    _onWatchEvent(_event) {
-        // Any event means state changed — do a fresh poll for full data.
+    _onWatchEvent(event) {
+        // Update global rate label immediately from the event stream.
+        if (this._rateLabel) {
+            const up   = event.global_upload_rate   || 0;
+            const down = event.global_download_rate || 0;
+            if (up > 0 || down > 0) {
+                this._rateLabel.set_text(
+                    ` \u2191${_humanRate(up)} \u2193${_humanRate(down)}`
+                );
+            } else {
+                this._rateLabel.set_text('');
+            }
+        }
+        // Any event means state changed - do a fresh poll for full data.
         this._pollStatus();
     }
 
@@ -181,6 +209,7 @@ export default class PeerDupExtension extends Extension {
                             this._shares.set(s.share_id, s);
                         this._rebuildMenu();
                         this._updateIconState();
+                        this._pollRegistryStatus();
                         return;
                     }
                 } catch (_) {}
@@ -190,6 +219,32 @@ export default class PeerDupExtension extends Extension {
         } catch (_) {
             this._setMenuError('Daemon unavailable');
             this._setIconState('error');
+        }
+    }
+
+    _pollRegistryStatus() {
+        try {
+            const proc = new Gio.Subprocess({
+                argv:  [PEERDUP_BIN, 'registry', 'status', '--json'],
+                flags: Gio.SubprocessFlags.STDOUT_PIPE |
+                       Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            proc.init(null);
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                try {
+                    const [, stdout] = p.communicate_utf8_finish(res);
+                    const data = JSON.parse(stdout?.trim() ?? '{}');
+                    if (data.connection_state !== undefined) {
+                        this._registryStatus = data;
+                        this._updateRegistryMenuItem();
+                        return;
+                    }
+                } catch (_) {}
+                this._registryStatus = null;
+                this._updateRegistryMenuItem();
+            });
+        } catch (_) {
+            this._registryStatus = null;
         }
     }
 
@@ -220,7 +275,30 @@ export default class PeerDupExtension extends Extension {
             }
         }
 
+        // Registry status section
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._registryMenuItem = new PopupMenu.PopupMenuItem(
+            this._registryStatusText(), {reactive: false}
+        );
+        this._indicator.menu.addMenuItem(this._registryMenuItem);
+
         this._addShareActions();
+    }
+
+    _registryStatusText() {
+        const s = this._registryStatus;
+        if (!s || !s.registry_address) {
+            return '- registry: not configured';
+        }
+        const dot = s.connection_state === 'connected'    ? '\u25cf' :  // filled circle
+                    s.connection_state === 'disconnected'  ? '\u25d4' :  // half circle
+                    '\u25cb';                                             // empty circle
+        return `${dot} registry: ${s.connection_state}`;
+    }
+
+    _updateRegistryMenuItem() {
+        if (this._registryMenuItem)
+            this._registryMenuItem.label.set_text(this._registryStatusText());
     }
 
     _addShareActions() {
@@ -384,9 +462,30 @@ export default class PeerDupExtension extends Extension {
     _updateIconState() {
         if (!this._shares || this._shares.size === 0) {
             this._setIconState('error');
+            if (this._rateLabel) this._rateLabel.set_text('');
             return;
         }
         const shares = [...this._shares.values()];
+
+        // Compute aggregate rates from per-share data.
+        let totalUp   = 0;
+        let totalDown = 0;
+        for (const s of shares) {
+            totalUp   += s.upload_rate   || 0;
+            totalDown += s.download_rate || 0;
+        }
+
+        // Update panel rate label.
+        if (this._rateLabel) {
+            if (totalUp > 0 || totalDown > 0) {
+                this._rateLabel.set_text(
+                    ` \u2191${_humanRate(totalUp)} \u2193${_humanRate(totalDown)}`
+                );
+            } else {
+                this._rateLabel.set_text('');
+            }
+        }
+
         if (shares.some(s =>
             s.state === 'syncing' || s.state === 'checking' ||
             s.download_rate > 0  || s.upload_rate > 0

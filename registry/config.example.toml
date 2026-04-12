@@ -30,3 +30,9 @@ enabled      = false
 log_file     = "audit.log"   # relative to CWD or absolute path
 # max_bytes    = 10485760     # 10 MB per file (default)
 # backup_count = 5            # keep 5 rotated files (default)
+
+[metrics]
+# Prometheus /metrics endpoint. Requires: pip install prometheus-client
+# Disabled by default -- enable for production deployments.
+enabled = false
+port    = 9090
