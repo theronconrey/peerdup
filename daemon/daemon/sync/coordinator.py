@@ -329,17 +329,20 @@ class SyncCoordinator:
           2. known_peers table — online status + last-seen addresses
           3. libtorrent — active transfer rates for connected peers
         """
-        # Source 1: registry ACL (requires membership).
-        try:
-            share_proto  = self._registry.get_share(share_id)
-            share_name   = share_proto.name
-            registry_peers = {
-                sp.peer_id: sp for sp in share_proto.peers
-            }
-        except Exception as e:
-            log.warning("Could not fetch share from registry: %s", e)
-            share_name     = share_id[:8]
+        # Source 1: registry ACL (registry shares only).
+        local_share_row = self._db.get_share(share_id)
+        if local_share_row and local_share_row.local_only:
+            share_name     = local_share_row.name or share_id[:8]
             registry_peers = {}
+        else:
+            try:
+                share_proto    = self._registry.get_share(share_id)
+                share_name     = share_proto.name
+                registry_peers = {sp.peer_id: sp for sp in share_proto.peers}
+            except Exception as e:
+                log.warning("Could not fetch share from registry: %s", e)
+                share_name     = share_id[:8]
+                registry_peers = {}
 
         # Source 2: local known_peers (online status + addresses).
         known = {
@@ -1093,6 +1096,12 @@ class SyncCoordinator:
             log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
                      share_id[:8], peer_id[:8], host, port)
             self._lt.add_peer(share_id, host, port)
+            self._db.upsert_peer(
+                share_id,
+                peer_id,
+                [{"host": host, "port": port, "is_lan": True}],
+                online=True,
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
