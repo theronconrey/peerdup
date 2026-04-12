@@ -308,10 +308,9 @@ class LanDiscovery:
 
     def _on_datagram(self, data: bytes, host: str):
         """Called from the event loop when a datagram arrives."""
-        log.info("LAN datagram received bytes=%d host=%s", len(data), host)
         result = unpack_packet(data)
         if result is None:
-            log.info("LAN datagram from %s failed to unpack (len=%d)", host, len(data))
+            log.debug("LAN datagram from %s failed to unpack (len=%d)", host, len(data))
             return
 
         peer_id, share_ids, listen_port = result

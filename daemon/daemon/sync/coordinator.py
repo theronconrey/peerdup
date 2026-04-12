@@ -1086,8 +1086,6 @@ class SyncCoordinator:
             for share_id in share_ids:
                 local_share = self._db.get_share(share_id)
                 if not local_share:
-                    log.info("LAN peer %s announced unknown share %s - skip",
-                             peer_id[:8], share_id[:8])
                     continue
                 if not local_share.local_only:
                     known = {kp.peer_id
