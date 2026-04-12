@@ -155,6 +155,14 @@ def _build_share_peer(membership, ann, pb, Timestamp) -> object:
     )
 
 
+def _build_share_policy(share_model, pb):
+    """Build a SharePolicy proto from a ShareModel's policy fields."""
+    return pb.SharePolicy(
+        upload_limit_bps   = share_model.upload_limit_bps or 0,
+        download_limit_bps = share_model.download_limit_bps or 0,
+    )
+
+
 class RegistryServicer:
     def __init__(self, session_factory,
                  event_loop: asyncio.AbstractEventLoop | None = None,
@@ -366,6 +374,7 @@ class RegistryServicer:
                 name       = share.name,
                 owner_id   = share.owner_id,
                 created_at = _to_proto_ts(share.created_at, Timestamp),
+                policy     = _build_share_policy(share, pb),
             )
 
         log.info("CreateShare share_id=%s owner=%s", request.share_id, caller_id)
@@ -412,6 +421,7 @@ class RegistryServicer:
                 owner_id   = share.owner_id,
                 peers      = members,
                 created_at = _to_proto_ts(share.created_at, Timestamp),
+                policy     = _build_share_policy(share, pb),
             ))
 
     # ── AddPeerToShare ────────────────────────────────────────────────────────
@@ -466,6 +476,7 @@ class RegistryServicer:
             name     = share.name,
             owner_id = share.owner_id,
             peers    = members,
+            policy   = _build_share_policy(share, pb),
         ))
 
     # ── RemovePeerFromShare ───────────────────────────────────────────────────
@@ -660,7 +671,14 @@ class RegistryServicer:
 
         self._audit.log("get_share_peers", caller_id, "ok",
                         share_id=request.share_id, remote_ip=_remote_ip(context))
-        return pb.GetSharePeersResponse(peers=peers)
+
+        with self._sf() as session:
+            share_row = session.query(ShareModel).filter_by(
+                share_id=request.share_id
+            ).first()
+            policy = _build_share_policy(share_row, pb) if share_row else pb.SharePolicy()
+
+        return pb.GetSharePeersResponse(peers=peers, policy=policy)
 
     # ── WatchSharePeers (server-streaming) ────────────────────────────────────
 
@@ -894,6 +912,55 @@ class RegistryServicer:
             announce_rate_per_hour = announce_rate_per_hour,
             peak_peers_24h         = peak_peers_24h,
             last_announce_at       = last_announce_at,
+        )
+
+    # ── SetSharePolicy ────────────────────────────────────────────────────────
+
+    def SetSharePolicy(self, request, context):
+        pb, Timestamp = self._pb, self._Timestamp
+        caller_id = self._require_auth(context)
+        self._require_share_owner(context, request.share_id, caller_id,
+                                  action="set_share_policy")
+
+        with self._sf() as session:
+            share_model = session.query(ShareModel).filter_by(
+                share_id=request.share_id
+            ).first()
+            if not share_model:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Share not found")
+
+            share_model.upload_limit_bps   = max(0, request.upload_limit_bps)
+            share_model.download_limit_bps = max(0, request.download_limit_bps)
+            session.commit()
+
+            policy = pb.SharePolicy(
+                upload_limit_bps   = share_model.upload_limit_bps,
+                download_limit_bps = share_model.download_limit_bps,
+            )
+
+        log.info(
+            "SetSharePolicy share=%s up=%d down=%d caller=%s",
+            request.share_id[:8],
+            request.upload_limit_bps,
+            request.download_limit_bps,
+            caller_id[:8],
+        )
+        self._audit.log("set_share_policy", caller_id, "ok",
+                        share_id=request.share_id, remote_ip=_remote_ip(context))
+
+        # Publish POLICY_UPDATED event to all active WatchSharePeers subscribers.
+        ts = Timestamp()
+        ts.FromDatetime(_now())
+        event = pb.PeerEvent(
+            type        = pb.PeerEvent.EVENT_TYPE_POLICY_UPDATED,
+            occurred_at = ts,
+            policy      = policy,
+        )
+        self._publish_event(request.share_id, event)
+
+        return pb.SetSharePolicyResponse(
+            share_id = request.share_id,
+            policy   = policy,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────

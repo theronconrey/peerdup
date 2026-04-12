@@ -55,10 +55,12 @@ class PeerModel(Base):
 class ShareModel(Base):
     __tablename__ = "shares"
 
-    share_id   = Column(String, primary_key=True)   # Ed25519 pubkey, base58
-    name       = Column(String, nullable=False)
-    owner_id   = Column(String, ForeignKey("peers.peer_id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utcnow)
+    share_id           = Column(String, primary_key=True)   # Ed25519 pubkey, base58
+    name               = Column(String, nullable=False)
+    owner_id           = Column(String, ForeignKey("peers.peer_id"), nullable=False)
+    created_at         = Column(DateTime(timezone=True), default=utcnow)
+    upload_limit_bps   = Column(Integer, nullable=False, default=0, server_default="0")
+    download_limit_bps = Column(Integer, nullable=False, default=0, server_default="0")
 
     owner   = relationship("PeerModel", foreign_keys=[owner_id])
     members = relationship("SharePeerModel", back_populates="share",

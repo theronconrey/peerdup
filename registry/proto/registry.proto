@@ -19,6 +19,14 @@ enum Permission {
   PERMISSION_ENCRYPTED   = 3;  // stores ciphertext only, cannot read plaintext
 }
 
+// Rate limit policy for a share, set by the share owner.
+// Advisory only - daemons are expected to honour limits but not required to.
+// Local-only daemons ignore registry policy and use their own [libtorrent] caps.
+message SharePolicy {
+  int64 upload_limit_bps   = 1;  // bytes/sec, 0 = unlimited
+  int64 download_limit_bps = 2;  // bytes/sec, 0 = unlimited
+}
+
 message Peer {
   string                    peer_id   = 1;  // Ed25519 pubkey, base58-encoded
   string                    name      = 2;
@@ -43,6 +51,7 @@ message Share {
   string                    owner_id   = 3;  // peer_id of creator
   repeated SharePeer        peers      = 4;
   google.protobuf.Timestamp created_at = 5;
+  SharePolicy               policy     = 6;  // rate limit policy; unset = unlimited
 }
 
 // ── Peer identity ─────────────────────────────────────────────────────────────
@@ -107,6 +116,19 @@ message RemovePeerFromShareRequest {
 
 message RemovePeerFromShareResponse {}
 
+// ── Share policy ──────────────────────────────────────────────────────────────
+
+message SetSharePolicyRequest {
+  string share_id           = 1;
+  int64  upload_limit_bps   = 2;  // bytes/sec, 0 = unlimited
+  int64  download_limit_bps = 3;  // bytes/sec, 0 = unlimited
+}
+
+message SetSharePolicyResponse {
+  string      share_id = 1;
+  SharePolicy policy   = 2;
+}
+
 // ── Announce / Discovery ──────────────────────────────────────────────────────
 
 message AnnounceRequest {
@@ -137,10 +159,11 @@ message GetSharePeersRequest {
 }
 
 message GetSharePeersResponse {
-  repeated SharePeer peers = 1;
+  repeated SharePeer peers  = 1;
+  SharePolicy        policy = 2;  // current share rate limit policy
 }
 
-// Server-streaming subscription — emits events as peer state changes.
+// Server-streaming subscription - emits events as peer state changes.
 message WatchSharePeersRequest {
   string share_id         = 1;
   bool   include_offline  = 2;  // if false, only ONLINE/UPDATED events are emitted
@@ -148,15 +171,17 @@ message WatchSharePeersRequest {
 
 message PeerEvent {
   enum EventType {
-    EVENT_TYPE_UNSPECIFIED = 0;
-    EVENT_TYPE_ONLINE      = 1;  // peer announced; addresses populated
-    EVENT_TYPE_OFFLINE     = 2;  // peer TTL expired
-    EVENT_TYPE_UPDATED     = 3;  // peer re-announced with changed addresses
-    EVENT_TYPE_REMOVED     = 4;  // peer removed from share ACL
+    EVENT_TYPE_UNSPECIFIED    = 0;
+    EVENT_TYPE_ONLINE         = 1;  // peer announced; addresses populated
+    EVENT_TYPE_OFFLINE        = 2;  // peer TTL expired
+    EVENT_TYPE_UPDATED        = 3;  // peer re-announced with changed addresses
+    EVENT_TYPE_REMOVED        = 4;  // peer removed from share ACL
+    EVENT_TYPE_POLICY_UPDATED = 5;  // share rate limit policy changed by owner
   }
   EventType                 type        = 1;
-  SharePeer                 peer        = 2;
+  SharePeer                 peer        = 2;  // populated for peer events
   google.protobuf.Timestamp occurred_at = 3;
+  SharePolicy               policy      = 4;  // populated for POLICY_UPDATED events
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -200,6 +225,9 @@ service RegistryService {
   rpc GetShare            (GetShareRequest)            returns (GetShareResponse);
   rpc AddPeerToShare      (AddPeerToShareRequest)      returns (AddPeerToShareResponse);
   rpc RemovePeerFromShare (RemovePeerFromShareRequest) returns (RemovePeerFromShareResponse);
+
+  // Share policy (rate limits, owner-only)
+  rpc SetSharePolicy      (SetSharePolicyRequest)      returns (SetSharePolicyResponse);
 
   // Announce / Discovery
   rpc Announce            (AnnounceRequest)            returns (AnnounceResponse);

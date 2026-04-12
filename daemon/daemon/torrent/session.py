@@ -237,6 +237,28 @@ class LibtorrentSession:
                 log.debug("Rate limit share=%s up=%d down=%d",
                           share_id, upload_limit, download_limit)
 
+    def set_share_rate_limit(self, share_id: str,
+                             upload_bps: int, download_bps: int) -> None:
+        """
+        Set per-share upload/download rate limits in the libtorrent session.
+
+        upload_bps / download_bps: bytes/sec; 0 = unlimited.
+        These are applied as per-torrent limits, not session-wide limits.
+        """
+        handle = self._handles.get(share_id)
+        if handle is None or not handle.is_valid():
+            log.debug("set_share_rate_limit: no handle for share=%s", share_id[:8])
+            return
+        try:
+            handle.set_upload_limit(upload_bps)
+            handle.set_download_limit(download_bps)
+            log.info(
+                "Rate limit set share=%s up=%d down=%d",
+                share_id[:8], upload_bps, download_bps,
+            )
+        except Exception:
+            log.exception("Failed to set rate limit for share=%s", share_id[:8])
+
     def get_status(self, share_id: str) -> TorrentStatus | None:
         """Return current status for a share's torrent."""
         with self._lock:

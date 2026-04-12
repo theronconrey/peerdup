@@ -314,11 +314,14 @@ class SyncCoordinator:
         # User-supplied name takes precedence over registry name.
         if not name:
             name = share_id[:8]
+        registry_policy = None
         if not local_only:
             try:
                 share_proto = self._registry.get_share(share_id)
                 if not name or name == share_id[:8]:
                     name = share_proto.name
+                if share_proto.HasField("policy"):
+                    registry_policy = share_proto.policy
             except Exception as e:
                 log.warning("Could not fetch share from registry: %s", e)
 
@@ -329,6 +332,14 @@ class SyncCoordinator:
 
         # Activate.
         await self._activate_share(share_id, local_path)
+
+        # Apply any registry-advertised bandwidth policy.
+        if registry_policy is not None:
+            self._peer_handler._apply_policy(
+                share_id,
+                registry_policy.upload_limit_bps,
+                registry_policy.download_limit_bps,
+            )
 
         status = self._lt.get_status(share_id)
         return self._build_share_status(share_id, name, local_path,

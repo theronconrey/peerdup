@@ -21,6 +21,22 @@ from daemon.torrent.session import LibtorrentSession
 log = logging.getLogger(__name__)
 
 
+def _effective_limit(registry: int, local: int) -> int:
+    """
+    Return the effective rate limit given registry and local caps.
+
+    0 means unlimited. When both are set (non-zero), use the lower value.
+    When only one is set, use it. When neither is set, return 0 (unlimited).
+    """
+    if registry == 0 and local == 0:
+        return 0
+    if registry == 0:
+        return local
+    if local == 0:
+        return registry
+    return min(registry, local)
+
+
 class PeerEventHandler:
     """
     Handles all peer-presence events for the daemon.
@@ -94,7 +110,28 @@ class PeerEventHandler:
         """
         from daemon import registry_pb2 as pb  # type: ignore
 
+        # Resolve POLICY_UPDATED safely whether or not the stubs were
+        # regenerated from the updated proto (new constant = 5).
+        _POLICY_UPDATED = getattr(pb.PeerEvent, 'EVENT_TYPE_POLICY_UPDATED', 5)
+
         async def _handler(event) -> None:
+            # POLICY_UPDATED events carry no peer field - handle them first.
+            if event.type == _POLICY_UPDATED:
+                up   = event.policy.upload_limit_bps
+                down = event.policy.download_limit_bps
+                log.info(
+                    "Policy updated share=%s up=%d down=%d",
+                    share_id, up, down,
+                )
+                self._apply_policy(share_id, up, down)
+                await self._on_publish_event({
+                    "type":         "policy_updated",
+                    "share_id":     share_id,
+                    "upload_bps":   up,
+                    "download_bps": down,
+                })
+                return  # no peer event to publish after this
+
             peer_id = event.peer.peer_id
 
             if peer_id == self._identity.peer_id:
@@ -400,6 +437,36 @@ class PeerEventHandler:
                 log.info("Conflict copy: %s -> %s", full_path.name, conflict_name)
             except Exception:
                 log.exception("Failed to rename conflict file %s", full_path)
+
+    # ------------------------------------------------------------------
+    # Policy application
+    # ------------------------------------------------------------------
+
+    def _apply_policy(self, share_id: str, upload_bps: int, download_bps: int) -> None:
+        """
+        Apply registry-advertised rate limits to the libtorrent handle.
+
+        Merges with local config caps: if both are set, use the more restrictive.
+        If either is 0 (unlimited), the other takes effect. Local caps always
+        override registry policy when more restrictive.
+
+        Args:
+            share_id: The share to apply limits to.
+            upload_bps: Registry advisory upload limit in bytes/sec (0 = unlimited).
+            download_bps: Registry advisory download limit in bytes/sec (0 = unlimited).
+        """
+        local_share = self._db.get_share(share_id)
+        if not local_share or local_share.local_only:
+            return  # Local-only shares ignore registry policy.
+
+        # Merge with local limits from DB (set via peerdup share set-limit).
+        local_up   = getattr(local_share, 'upload_limit', 0) or 0
+        local_down = getattr(local_share, 'download_limit', 0) or 0
+
+        effective_up   = _effective_limit(upload_bps,   local_up)
+        effective_down = _effective_limit(download_bps,  local_down)
+
+        self._lt.set_share_rate_limit(share_id, effective_up, effective_down)
 
     # ------------------------------------------------------------------
     # Relay bridge (private)
