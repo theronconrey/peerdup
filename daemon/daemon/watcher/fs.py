@@ -79,6 +79,15 @@ class _ShareHandler(FileSystemEventHandler):
 
     def on_moved(self, event: FileMovedEvent):
         if event.is_directory:
+            # Emit per-file moved events for everything inside the renamed dir.
+            src = event.src_path
+            dst = event.dest_path
+            for root, _dirs, files in os.walk(dst):
+                for fname in files:
+                    dst_file = os.path.join(root, fname)
+                    rel      = os.path.relpath(dst_file, dst)
+                    src_file = os.path.join(src, rel)
+                    self._debounce(src_file, "moved", dst_file)
             return
         self._debounce(event.src_path, "moved", event.dest_path)
 

@@ -992,6 +992,18 @@ class SyncCoordinator:
         local_path = Path(share.local_path) / evt.rel_path
         if evt.change_type == "deleted":
             self._db.delete_file(evt.share_id, evt.rel_path)
+        elif evt.change_type == "moved" and evt.dest_path:
+            # Remove old DB entry, add new one at the destination path.
+            self._db.delete_file(evt.share_id, evt.rel_path)
+            dest_abs = Path(share.local_path) / evt.dest_path
+            try:
+                st = dest_abs.stat()
+                self._db.upsert_file(
+                    evt.share_id, evt.dest_path,
+                    size=st.st_size, mtime_ns=st.st_mtime_ns
+                )
+            except FileNotFoundError:
+                pass  # dest vanished between event and handling - torrent rebuild still proceeds
         else:
             try:
                 st = local_path.stat()
@@ -1027,8 +1039,9 @@ class SyncCoordinator:
                 for addr in json.loads(kp.addresses):
                     self._lt.add_peer(evt.share_id, addr["host"], addr["port"])
 
-            # Announce immediately.
-            await self._announce(evt.share_id)
+            # Announce immediately (registry shares only).
+            if not share.local_only:
+                await self._announce(evt.share_id)
 
         except Exception:
             log.exception("Failed to update torrent after fs event share=%s",
