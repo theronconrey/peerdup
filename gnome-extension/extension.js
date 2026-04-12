@@ -302,16 +302,53 @@ export default class PeerDupExtension extends Extension {
     }
 
     _addShareActions() {
-        if (!HAS_ZENITY) return;
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        const createItem = new PopupMenu.PopupMenuItem('New share...');
-        createItem.connect('activate', () => this._showCreateShare());
-        this._indicator.menu.addMenuItem(createItem);
+        if (HAS_ZENITY) {
+            const createItem = new PopupMenu.PopupMenuItem('New share...');
+            createItem.connect('activate', () => this._showCreateShare());
+            this._indicator.menu.addMenuItem(createItem);
 
-        const joinItem = new PopupMenu.PopupMenuItem('Join share...');
-        joinItem.connect('activate', () => this._showJoinShare());
-        this._indicator.menu.addMenuItem(joinItem);
+            const joinItem = new PopupMenu.PopupMenuItem('Join share...');
+            joinItem.connect('activate', () => this._showJoinShare());
+            this._indicator.menu.addMenuItem(joinItem);
+        }
+
+        const stopItem = new PopupMenu.PopupMenuItem('Stop daemon');
+        stopItem.connect('activate', () => this._confirmStopDaemon());
+        this._indicator.menu.addMenuItem(stopItem);
+    }
+
+    _confirmStopDaemon() {
+        const doStop = () => this._runCmd(
+            ['systemctl', '--user', 'stop', 'peerdup-daemon']
+        );
+
+        if (!HAS_ZENITY) {
+            doStop();
+            return;
+        }
+
+        try {
+            const proc = new Gio.Subprocess({
+                argv:  [ZENITY_BIN, '--question',
+                        '--title=Stop peerdup',
+                        '--text=Stop the peerdup daemon?',
+                        '--ok-label=Stop',
+                        '--cancel-label=Cancel'],
+                flags: Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            proc.init(null);
+            proc.wait_async(null, (p, res) => {
+                try {
+                    p.wait_finish(res);
+                    if (p.get_exit_status() === 0)
+                        doStop();
+                } catch (_) {}
+            });
+        } catch (_) {
+            doStop();
+        }
     }
 
     _addShareSection(share) {
