@@ -56,6 +56,7 @@ class LocalShare(Base):
     state       = Column(Enum(ShareState), nullable=False,
                          default=ShareState.SYNCING)
     info_hash      = Column(String, nullable=True)   # current libtorrent info-hash
+    seq            = Column(Integer, nullable=False, default=0)  # local change counter
     last_error     = Column(String, nullable=True)
     upload_limit      = Column(Integer, nullable=False, default=0)   # bytes/sec, 0 = unlimited
     download_limit    = Column(Integer, nullable=False, default=0)
@@ -168,6 +169,7 @@ def _migrate(engine):
         ("local_shares", "download_limit",    "INTEGER NOT NULL DEFAULT 0"),
         ("local_shares", "conflict_strategy", "TEXT NOT NULL DEFAULT 'last_write_wins'"),
         ("local_shares", "local_only",        "BOOLEAN NOT NULL DEFAULT 0"),
+        ("local_shares", "seq",               "INTEGER NOT NULL DEFAULT 0"),
         ("known_peers",  "name",              "TEXT NOT NULL DEFAULT ''"),
     ]
     with engine.connect() as conn:
@@ -259,6 +261,24 @@ class StateDB:
                 share.last_error = error
                 if info_hash is not None:
                     share.info_hash = info_hash
+                s.commit()
+
+    def increment_share_seq(self, share_id: str) -> int:
+        """Increment and return the local change counter for a share."""
+        with self._sf() as s:
+            share = s.query(LocalShare).filter_by(share_id=share_id).first()
+            if share:
+                share.seq = (share.seq or 0) + 1
+                s.commit()
+                return share.seq
+            return 0
+
+    def set_share_seq(self, share_id: str, seq: int):
+        """Adopt a remote peer's sequence number (called when switching to their torrent)."""
+        with self._sf() as s:
+            share = s.query(LocalShare).filter_by(share_id=share_id).first()
+            if share:
+                share.seq = seq
                 s.commit()
 
     # ── Files ─────────────────────────────────────────────────────────────────

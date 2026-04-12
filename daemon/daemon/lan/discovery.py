@@ -46,10 +46,11 @@ log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-VERSION      = 3
+VERSION      = 4
 PEER_ID_LEN  = 32   # raw Ed25519 pubkey
 SHARE_ID_LEN = 32
 INFO_HASH_LEN = 20  # raw SHA1 bytes
+SEQ_LEN      = 4   # uint32 local change counter
 SIG_LEN      = 64
 _MIN_PACKET  = 1 + PEER_ID_LEN + 2 + 2 + 2 + SIG_LEN   # 103 bytes (v2+ minimum)
 
@@ -75,14 +76,15 @@ def detect_multicast_interface() -> str:
 
 # ── Packet codec ─────────────────────────────────────────────────────────────
 
-def pack_packet(identity, shares: list[tuple[str, str]], listen_port: int,
+def pack_packet(identity, shares: list[tuple[str, str, int]], listen_port: int,
                 peer_name: str = "") -> bytes:
     """
-    Encode and sign an announcement packet (version 3).
+    Encode and sign an announcement packet (version 4).
 
     identity    — daemon.identity.Identity (provides peer_id + sign())
-    shares      — list of (share_id_base58, info_hash_hex) pairs to announce;
-                  info_hash_hex may be "" if not yet known
+    shares      — list of (share_id_base58, info_hash_hex, seq) triples;
+                  info_hash_hex may be "" if not yet known; seq is the
+                  local change counter used to resolve conflicts
     listen_port — libtorrent TCP listen port
     peer_name   — human-readable machine name
     """
@@ -93,10 +95,11 @@ def pack_packet(identity, shares: list[tuple[str, str]], listen_port: int,
     body  = struct.pack("!B", VERSION)
     body += peer_id_bytes
     body += struct.pack("!HH", listen_port, n)
-    for share_id, info_hash_hex in shares:
+    for share_id, info_hash_hex, seq in shares:
         body += base58.b58decode(share_id)
         ih = bytes.fromhex(info_hash_hex) if info_hash_hex else b'\x00' * INFO_HASH_LEN
         body += ih
+        body += struct.pack("!I", seq)
     body += struct.pack("!H", len(name_bytes))
     body += name_bytes
 
@@ -104,15 +107,17 @@ def pack_packet(identity, shares: list[tuple[str, str]], listen_port: int,
     return body + sig
 
 
-def unpack_packet(data: bytes) -> tuple[str, list[tuple[str, str]], int, str] | None:
+def unpack_packet(data: bytes) -> tuple[str, list[tuple[str, str, int]], int, str] | None:
     """
     Decode and verify an announcement packet.
 
     Returns (peer_id, shares, listen_port, name) on success, None on error,
-    where shares is a list of (share_id_base58, info_hash_hex) pairs.
+    where shares is a list of (share_id_base58, info_hash_hex, seq) triples.
 
-    Accepts version 1 (no name, no info_hash), version 2 (name, no info_hash),
-    and version 3 (name + per-share info_hash) packets.
+    Accepts version 1 (no name, no info_hash, no seq),
+    version 2 (name, no info_hash, no seq),
+    version 3 (name + per-share info_hash, no seq), and
+    version 4 (name + per-share info_hash + seq) packets.
     Does NOT check whether the peer_id is our own — callers must do that.
     """
     if len(data) < 1 + PEER_ID_LEN + 4 + SIG_LEN:
@@ -120,7 +125,7 @@ def unpack_packet(data: bytes) -> tuple[str, list[tuple[str, str]], int, str] | 
 
     pos = 0
     version = data[pos]; pos += 1
-    if version not in (1, 2, 3):
+    if version not in (1, 2, 3, 4):
         log.debug("LAN packet: unknown version %d", version)
         return None
 
@@ -136,15 +141,21 @@ def unpack_packet(data: bytes) -> tuple[str, list[tuple[str, str]], int, str] | 
             return None
         share_id_bytes = data[pos:pos + SHARE_ID_LEN]; pos += SHARE_ID_LEN
         info_hash_hex = ""
+        seq = 0
         if version >= 3:
             if pos + INFO_HASH_LEN > len(data):
                 return None
             ih_bytes = data[pos:pos + INFO_HASH_LEN]; pos += INFO_HASH_LEN
             if ih_bytes != b'\x00' * INFO_HASH_LEN:
                 info_hash_hex = ih_bytes.hex()
+        if version >= 4:
+            if pos + SEQ_LEN > len(data):
+                return None
+            seq, = struct.unpack_from("!I", data, pos); pos += SEQ_LEN
         shares.append((
             base58.b58encode(share_id_bytes).decode(),
             info_hash_hex,
+            seq,
         ))
 
     # Version 2+: name field before signature.
@@ -212,10 +223,10 @@ class LanDiscovery:
     ──────────
     identity          — daemon Identity (peer_id + signing)
     config            — LanConfig (group, port, interval, interface)
-    get_share_ids     — sync callable returning list[str] of active share_ids
+    get_share_ids     — sync callable returning list of (share_id, info_hash, seq)
     on_peer_seen      — async(peer_id, shares, host, port, name) called on each
                         valid remote announcement; shares is list of
-                        (share_id, info_hash_hex) pairs; caller performs ACL check
+                        (share_id, info_hash_hex, seq) triples; caller performs ACL check
     listen_port       — this peer's libtorrent TCP listen port to advertise
     peer_name         — human-readable name included in outgoing v3 packets
     """
@@ -223,8 +234,8 @@ class LanDiscovery:
     def __init__(self,
                  identity,
                  config,
-                 get_share_ids:  Callable[[], list[tuple[str, str]]],
-                 on_peer_seen:   Callable[[str, list[tuple[str, str]], str, int, str],
+                 get_share_ids:  Callable[[], list[tuple[str, str, int]]],
+                 on_peer_seen:   Callable[[str, list[tuple[str, str, int]], str, int, str],
                                           Awaitable[None]],
                  listen_port:    int,
                  peer_name:      str = ""):

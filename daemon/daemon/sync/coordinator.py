@@ -909,6 +909,10 @@ class SyncCoordinator:
                                      ShareState.SEEDING if has_files
                                      else ShareState.SYNCING,
                                      info_hash=ih)
+            if has_files and (local_share is None or (local_share.seq or 0) == 0):
+                # First activation with local content - set initial seq so
+                # other peers know we have content and can compare.
+                self._db.increment_share_seq(share_id)
         except Exception as e:
             log.exception("Failed to add torrent for share %s", share_id)
             self._db.set_share_state(share_id, ShareState.ERROR, error=str(e))
@@ -1055,8 +1059,11 @@ class SyncCoordinator:
                     seed_mode=True,
                 ),
             )
+            new_seq = self._db.increment_share_seq(evt.share_id)
             self._db.set_share_state(evt.share_id, ShareState.SEEDING,
                                      info_hash=ih)
+            log.debug("Torrent rebuilt share=%s info_hash=%s seq=%d",
+                      evt.share_id[:8], ih, new_seq)
 
             # Re-inject known peers.
             for kp in self._db.get_online_peers(evt.share_id):
@@ -1179,15 +1186,15 @@ class SyncCoordinator:
 
     # ── LAN discovery ─────────────────────────────────────────────────────────
 
-    def _get_active_share_ids(self) -> list[tuple[str, str]]:
-        """Return (share_id, info_hash) pairs for all non-paused local shares."""
+    def _get_active_share_ids(self) -> list[tuple[str, str, int]]:
+        """Return (share_id, info_hash, seq) triples for all non-paused local shares."""
         return [
-            (s.share_id, s.info_hash or "")
+            (s.share_id, s.info_hash or "", s.seq or 0)
             for s in self._db.list_shares()
             if s.state != ShareState.PAUSED
         ]
 
-    async def _on_lan_peer(self, peer_id: str, shares: list[tuple[str, str]],
+    async def _on_lan_peer(self, peer_id: str, shares: list[tuple[str, str, int]],
                            host: str, port: int, name: str = ""):
         """
         Called by LanDiscovery for each verified remote announcement.
@@ -1197,12 +1204,13 @@ class SyncCoordinator:
         that cache, so any peer whose signed packet carries the correct
         share_id is admitted directly.
 
-        If the remote peer announces an info_hash that differs from ours,
-        call _handle_remote_update to apply the share's conflict strategy
-        (which may switch us to their torrent so we can fetch their content).
+        Sequence numbers resolve conflicts: higher seq = more recent local
+        changes. If remote_seq > local_seq, accept their version. If
+        remote_seq < local_seq, we have newer changes — seed to them instead.
+        Equal seq with different hash = true conflict, apply conflict strategy.
         """
         try:
-            for share_id, remote_ih in shares:
+            for share_id, remote_ih, remote_seq in shares:
                 local_share = self._db.get_share(share_id)
                 if not local_share:
                     continue
@@ -1223,15 +1231,30 @@ class SyncCoordinator:
                     name=name,
                 )
 
-                local_ih = local_share.info_hash or ""
+                local_ih  = local_share.info_hash or ""
+                local_seq = local_share.seq or 0
+
                 if remote_ih and local_ih and remote_ih != local_ih:
-                    # Remote peer has different content - apply conflict strategy.
-                    log.info("LAN info_hash mismatch share=%s peer=%s "
-                             "local=%s remote=%s",
-                             share_id[:8], peer_id[:8], local_ih[:8], remote_ih[:8])
-                    await self._handle_remote_update(
-                        share_id, remote_ih, peer_id, local_share,
-                    )
+                    if remote_seq > local_seq:
+                        # Remote has newer changes - accept their version.
+                        log.info("LAN mismatch share=%s peer=%s remote_seq=%d>local=%d - accepting",
+                                 share_id[:8], peer_id[:8], remote_seq, local_seq)
+                        self._db.set_share_seq(share_id, remote_seq)
+                        await self._handle_remote_update(
+                            share_id, remote_ih, peer_id, local_share,
+                        )
+                    elif remote_seq == local_seq:
+                        # True conflict: both changed since last sync.
+                        log.info("LAN conflict share=%s peer=%s seq=%d - applying strategy",
+                                 share_id[:8], peer_id[:8], remote_seq)
+                        await self._handle_remote_update(
+                            share_id, remote_ih, peer_id, local_share,
+                        )
+                    else:
+                        # We have newer changes - seed to them.
+                        log.info("LAN mismatch share=%s peer=%s remote_seq=%d<local=%d - seeding to them",
+                                 share_id[:8], peer_id[:8], remote_seq, local_seq)
+                        self._lt.add_peer(share_id, host, port)
                 else:
                     # Same torrent or one side has no content yet - inject peer.
                     log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
