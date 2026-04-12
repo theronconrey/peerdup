@@ -893,30 +893,39 @@ class SyncCoordinator:
             except Exception:
                 pass
 
-        try:
-            loop = asyncio.get_running_loop()
-            ih = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._lt.add_share,
-                    share_id, local_path,
-                    torrent_path=torrent_path,
-                    seed_mode=has_files,
-                    info_hash=peer_info_hash,
-                ),
-            )
-            self._db.set_share_state(share_id,
-                                     ShareState.SEEDING if has_files
-                                     else ShareState.SYNCING,
-                                     info_hash=ih)
-            if has_files and (local_share is None or (local_share.seq or 0) == 0):
-                # First activation with local content - set initial seq so
-                # other peers know we have content and can compare.
-                self._db.increment_share_seq(share_id)
-        except Exception as e:
-            log.exception("Failed to add torrent for share %s", share_id)
-            self._db.set_share_state(share_id, ShareState.ERROR, error=str(e))
-            return
+        if not has_files and peer_info_hash is None and not os.path.exists(torrent_path):
+            # Empty directory with no known info_hash - we can't build a torrent
+            # from nothing. Stay in SYNCING and wait for a LAN announcement to
+            # provide the remote info_hash; _on_lan_peer will call
+            # _switch_to_remote_torrent to bootstrap the magnet download.
+            self._db.set_share_state(share_id, ShareState.SYNCING)
+            log.info("Share %s: no files and no peer info_hash - waiting for LAN peer",
+                     share_id)
+        else:
+            try:
+                loop = asyncio.get_running_loop()
+                ih = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._lt.add_share,
+                        share_id, local_path,
+                        torrent_path=torrent_path,
+                        seed_mode=has_files,
+                        info_hash=peer_info_hash,
+                    ),
+                )
+                self._db.set_share_state(share_id,
+                                         ShareState.SEEDING if has_files
+                                         else ShareState.SYNCING,
+                                         info_hash=ih)
+                if has_files and (local_share is None or (local_share.seq or 0) == 0):
+                    # First activation with local content - set initial seq so
+                    # other peers know we have content and can compare.
+                    self._db.increment_share_seq(share_id)
+            except Exception as e:
+                log.exception("Failed to add torrent for share %s", share_id)
+                self._db.set_share_state(share_id, ShareState.ERROR, error=str(e))
+                return
 
         # Apply any stored per-share rate limits.
         if local_share and (local_share.upload_limit or local_share.download_limit):
@@ -1245,7 +1254,14 @@ class SyncCoordinator:
                 local_ih  = local_share.info_hash or ""
                 local_seq = local_share.seq or 0
 
-                if remote_ih and local_ih and remote_ih != local_ih:
+                if remote_ih and not local_ih:
+                    # No local torrent yet - bootstrap from remote info_hash.
+                    log.info("LAN bootstrap share=%s peer=%s - fetching from peer",
+                             share_id[:8], peer_id[:8])
+                    self._db.set_share_seq(share_id, remote_seq)
+                    await self._switch_to_remote_torrent(share_id, remote_ih)
+                    self._lt.add_peer(share_id, host, port)
+                elif remote_ih and local_ih and remote_ih != local_ih:
                     if remote_seq > local_seq:
                         # Remote has newer changes - accept their version.
                         log.info("LAN mismatch share=%s peer=%s remote_seq=%d>local=%d - accepting",
