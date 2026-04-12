@@ -85,10 +85,18 @@ class RegistryClient:
         self._channel = None
         self._stub    = None
 
+    @property
+    def is_configured(self) -> bool:
+        """True when a registry address has been set."""
+        return bool(self._address)
+
     # ── Connection ────────────────────────────────────────────────────────────
 
     def connect(self):
-        """Open the gRPC channel. Call once at startup."""
+        """Open the gRPC channel. Call once at startup. No-op when not configured."""
+        if not self.is_configured:
+            return
+
         from daemon import registry_pb2_grpc as pb_grpc  # type: ignore
 
         interceptor = _BearerInterceptor(lambda: self._token)

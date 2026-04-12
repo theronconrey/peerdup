@@ -92,7 +92,7 @@ class DaemonConfig:
 
 @dataclass
 class RegistryConfig:
-    address:   str            = "localhost:50051"
+    address:   str            = ""   # empty = no registry (LAN-only mode)
     tls:       bool           = False
     ca_file:   Optional[str]  = None
     cert_file: Optional[str]  = None

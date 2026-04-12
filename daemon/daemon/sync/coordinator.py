@@ -927,23 +927,26 @@ class SyncCoordinator:
 
     async def _registry_connect_loop(self):
         """Register with registry (retrying with backoff), then resume shares."""
-        backoff = 1.0
-        while True:
-            try:
-                sig = self._identity.sign_register(self._identity_name)
-                self._registry.register_peer(
-                    self._identity.peer_id,
-                    self._identity_name,
-                    sig,
-                )
-                log.info("Registered with registry")
-                break
-            except Exception as exc:
-                log.warning(
-                    "Registry unavailable (%s) - retrying in %.0fs", exc, backoff
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+        if self._registry.is_configured:
+            backoff = 1.0
+            while True:
+                try:
+                    sig = self._identity.sign_register(self._identity_name)
+                    self._registry.register_peer(
+                        self._identity.peer_id,
+                        self._identity_name,
+                        sig,
+                    )
+                    log.info("Registered with registry")
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "Registry unavailable (%s) - retrying in %.0fs", exc, backoff
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+        else:
+            log.info("No registry configured - running in LAN-only mode")
 
         for share in self._db.list_shares():
             if share.state != ShareState.PAUSED:

@@ -155,8 +155,7 @@ EOF
     printf '\nConfiguration saved to config.toml\n'
 
     if [ -z "$REGISTRY_ADDRESS" ]; then
-        printf '\n\033[1;31mRegistry not configured - edit config.toml and rerun peerdup-setup when ready.\033[0m\n'
-        exit 0
+        printf '\n\033[1;33m note\033[0m Running in LAN-only mode. To add a registry later, edit config.toml and rerun peerdup-setup.\n'
     fi
 
     printf '\n'
