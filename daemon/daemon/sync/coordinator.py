@@ -1075,12 +1075,15 @@ class SyncCoordinator:
 
     # ── LAN discovery ─────────────────────────────────────────────────────────
 
-    def _get_active_share_ids(self) -> list[str]:
-        """Return share_ids for all non-paused local shares."""
-        return [s.share_id for s in self._db.list_shares()
-                if s.state != ShareState.PAUSED]
+    def _get_active_share_ids(self) -> list[tuple[str, str]]:
+        """Return (share_id, info_hash) pairs for all non-paused local shares."""
+        return [
+            (s.share_id, s.info_hash or "")
+            for s in self._db.list_shares()
+            if s.state != ShareState.PAUSED
+        ]
 
-    async def _on_lan_peer(self, peer_id: str, share_ids: list[str],
+    async def _on_lan_peer(self, peer_id: str, shares: list[tuple[str, str]],
                            host: str, port: int, name: str = ""):
         """
         Called by LanDiscovery for each verified remote announcement.
@@ -1089,9 +1092,13 @@ class SyncCoordinator:
         known_peers cache.  For local-only shares the registry never populates
         that cache, so any peer whose signed packet carries the correct
         share_id is admitted directly.
+
+        If the remote peer announces an info_hash that differs from ours,
+        call _handle_remote_update to apply the share's conflict strategy
+        (which may switch us to their torrent so we can fetch their content).
         """
         try:
-            for share_id in share_ids:
+            for share_id, remote_ih in shares:
                 local_share = self._db.get_share(share_id)
                 if not local_share:
                     continue
@@ -1102,9 +1109,8 @@ class SyncCoordinator:
                         log.debug("LAN peer %s not in ACL cache for share %s - skip",
                                   peer_id[:8], share_id[:8])
                         continue
-                log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
-                         share_id[:8], peer_id[:8], host, port)
-                self._lt.add_peer(share_id, host, port)
+
+                # Persist peer presence before deciding what to do with torrent.
                 self._db.upsert_peer(
                     share_id,
                     peer_id,
@@ -1112,9 +1118,25 @@ class SyncCoordinator:
                     online=True,
                     name=name,
                 )
+
+                local_ih = local_share.info_hash or ""
+                if remote_ih and local_ih and remote_ih != local_ih:
+                    # Remote peer has different content - apply conflict strategy.
+                    log.info("LAN info_hash mismatch share=%s peer=%s "
+                             "local=%s remote=%s",
+                             share_id[:8], peer_id[:8], local_ih[:8], remote_ih[:8])
+                    await self._handle_remote_update(
+                        share_id, remote_ih, peer_id, local_share,
+                    )
+                else:
+                    # Same torrent (or one side has no content yet) - inject peer.
+                    log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
+                             share_id[:8], peer_id[:8], host, port)
+                    self._lt.add_peer(share_id, host, port)
+
         except Exception:
             log.exception("_on_lan_peer failed peer=%s shares=%s",
-                          peer_id[:8], [s[:8] for s in share_ids])
+                          peer_id[:8], [s[0][:8] for s in shares])
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
