@@ -314,7 +314,7 @@ export default class PeerDupExtension extends Extension {
             this._indicator.menu.addMenuItem(joinItem);
         }
 
-        const stopItem = new PopupMenu.PopupMenuItem('Stop daemon');
+        const stopItem = new PopupMenu.PopupMenuItem('stop peerdup');
         stopItem.connect('activate', () => this._confirmStopDaemon());
         this._indicator.menu.addMenuItem(stopItem);
     }
