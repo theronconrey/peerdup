@@ -1,5 +1,5 @@
 PROTO_SRC   = proto/registry.proto
-PROTO_OUT   = .   # generated stubs land in repo root alongside registry/
+PROTO_OUT   = registry
 
 .PHONY: install proto test cert clean
 
@@ -45,7 +45,7 @@ client-cert:
 	@echo "Generated client.key and client.crt (dev only)"
 
 clean:
-	rm -f registry_pb2.py registry_pb2_grpc.py
+	rm -f registry/registry_pb2.py registry/registry_pb2_grpc.py
 	rm -f server.key server.crt client.key client.crt client.csr server.srl
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete
