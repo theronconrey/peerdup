@@ -71,6 +71,14 @@ def _channel(socket_path: str) -> grpc.Channel:
 
 
 def _stub(socket_path: str):
+    # grpc_tools generates bare 'import control_pb2' in the grpc stub.
+    # Adding the daemon package directory to sys.path lets that resolve.
+    import importlib.util
+    _spec = importlib.util.find_spec("daemon")
+    if _spec and _spec.submodule_search_locations:
+        _pkg_dir = list(_spec.submodule_search_locations)[0]
+        if _pkg_dir not in sys.path:
+            sys.path.insert(0, _pkg_dir)
     from daemon import control_pb2_grpc  # type: ignore
     return control_pb2_grpc.ControlServiceStub(_channel(socket_path))
 
