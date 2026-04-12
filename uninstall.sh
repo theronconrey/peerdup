@@ -51,7 +51,7 @@ fi
 # ── uninstall Python packages ─────────────────────────────────────────────────
 
 if [ -n "$PIP" ]; then
-    for pkg in peerdup-daemon peerdup-registry; do
+    for pkg in peerdup-daemon peerdup-registry peerdup-relay; do
         if "$PIP" show "$pkg" >/dev/null 2>&1; then
             info "Uninstalling $pkg..."
             "$PIP" uninstall -y "$pkg"
