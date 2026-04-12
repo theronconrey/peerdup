@@ -20,6 +20,22 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const POLL_INTERVAL_S = 30;
 const RETRY_DELAY_S   = 5;
 
+// GNOME Shell's PATH doesn't include ~/.local/bin; search explicitly.
+function _findBin(name) {
+    const candidates = [
+        `${GLib.get_home_dir()}/.local/bin/${name}`,
+        `/usr/local/bin/${name}`,
+        `/usr/bin/${name}`,
+    ];
+    for (const p of candidates) {
+        if (GLib.file_test(p, GLib.FileTest.IS_EXECUTABLE))
+            return p;
+    }
+    return name; // fallback — will fail visibly
+}
+
+const PEERDUP_BIN = _findBin('peerdup');
+
 
 export default class PeerDupExtension extends Extension {
 
@@ -73,7 +89,7 @@ export default class PeerDupExtension extends Extension {
         try {
             this._watchCancel = new Gio.Cancellable();
             this._watchProc   = new Gio.Subprocess({
-                argv:  ['peerdup', 'watch', '--json'],
+                argv:  [PEERDUP_BIN, 'watch', '--json'],
                 flags: Gio.SubprocessFlags.STDOUT_PIPE |
                        Gio.SubprocessFlags.STDERR_SILENCE,
             });
@@ -148,7 +164,7 @@ export default class PeerDupExtension extends Extension {
     _pollStatus() {
         try {
             const proc = new Gio.Subprocess({
-                argv:  ['peerdup', 'share', 'list', '--json'],
+                argv:  [PEERDUP_BIN, 'share', 'list', '--json'],
                 flags: Gio.SubprocessFlags.STDOUT_PIPE |
                        Gio.SubprocessFlags.STDERR_SILENCE,
             });
@@ -163,14 +179,24 @@ export default class PeerDupExtension extends Extension {
                             this._shares.set(s.share_id, s);
                         this._rebuildMenu();
                         this._updateIconState();
+                        return;
                     }
-                } catch (_) {
-                    this._setIconState('error');
-                }
+                } catch (_) {}
+                this._setMenuError('Daemon unavailable');
+                this._setIconState('error');
             });
         } catch (_) {
+            this._setMenuError('Daemon unavailable');
             this._setIconState('error');
         }
+    }
+
+    _setMenuError(msg) {
+        if (!this._indicator) return;
+        this._indicator.menu.removeAll();
+        this._indicator.menu.addMenuItem(
+            new PopupMenu.PopupMenuItem(msg, {reactive: false})
+        );
     }
 
     // ── Menu ──────────────────────────────────────────────────────────────
@@ -210,8 +236,7 @@ export default class PeerDupExtension extends Extension {
             x_expand:    true,
         }));
 
-        const peerStr   = `${share.lt_peers}/${share.peers_online} peers`;
-        const hasConflict = share.last_error && share.last_error.includes('conflict');
+        const peerStr = `${share.lt_peers}/${share.peers_online} peers`;
         headerBox.add_child(new St.Label({
             text:        share.last_error ? `${peerStr} ⚠` : peerStr,
             style_class: share.last_error ? 'peerdup-peers-warn' : 'peerdup-peers-label',
@@ -257,7 +282,7 @@ export default class PeerDupExtension extends Extension {
         const cmd = currentlyPaused ? 'resume' : 'pause';
         try {
             const proc = new Gio.Subprocess({
-                argv:  ['peerdup', 'share', cmd, shareId],
+                argv:  [PEERDUP_BIN, 'share', cmd, shareId],
                 flags: Gio.SubprocessFlags.NONE,
             });
             proc.init(null);
