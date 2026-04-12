@@ -151,12 +151,18 @@ class SyncCoordinator:
         # LAN multicast discovery (optional).
         if lan_config and lan_config.enabled:
             from daemon.lan.discovery import LanDiscovery
+            actual_port = self._lt.actual_listen_port
+            if actual_port != self._listen_port:
+                log.info(
+                    "libtorrent bound to port %d (configured %d) - advertising actual port",
+                    actual_port, self._listen_port,
+                )
             self._lan = LanDiscovery(
                 identity      = self._identity,
                 config        = lan_config,
                 get_share_ids = self._get_active_share_ids,
                 on_peer_seen  = self._peer_handler.handle_lan_peer,
-                listen_port   = self._listen_port,
+                listen_port   = actual_port,
                 peer_name     = self._peer_name,
             )
             await self._lan.start()

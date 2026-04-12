@@ -103,6 +103,25 @@ class LibtorrentSession:
         self._alert_thread.start()
         log.info("libtorrent session started listen=%s", self._listen)
 
+    @property
+    def actual_listen_port(self) -> int:
+        """Return the TCP port libtorrent actually bound to.
+
+        libtorrent increments the port if the configured one is in use, so this
+        may differ from the configured listen_interfaces string. Must be called
+        after start().
+        """
+        if self._session is None:
+            raise RuntimeError("Session not started")
+        try:
+            return self._session.listen_port()
+        except Exception:
+            # Fallback: parse configured port from listen_interfaces string.
+            try:
+                return int(self._listen.rsplit(":", 1)[-1])
+            except (ValueError, IndexError):
+                return 55000
+
     def stop(self):
         """Gracefully stop the session."""
         self._stop_event.set()
