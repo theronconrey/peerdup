@@ -1082,26 +1082,32 @@ class SyncCoordinator:
         that cache, so any peer whose signed packet carries the correct
         share_id is admitted directly.
         """
-        for share_id in share_ids:
-            local_share = self._db.get_share(share_id)
-            if not local_share:
-                continue
-            if not local_share.local_only:
-                known = {kp.peer_id
-                         for kp in self._db.list_all_known_peers(share_id)}
-                if peer_id not in known:
-                    log.debug("LAN peer %s not in ACL cache for share %s - skip",
-                              peer_id[:8], share_id[:8])
+        try:
+            for share_id in share_ids:
+                local_share = self._db.get_share(share_id)
+                if not local_share:
+                    log.info("LAN peer %s announced unknown share %s - skip",
+                             peer_id[:8], share_id[:8])
                     continue
-            log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
-                     share_id[:8], peer_id[:8], host, port)
-            self._lt.add_peer(share_id, host, port)
-            self._db.upsert_peer(
-                share_id,
-                peer_id,
-                [{"host": host, "port": port, "is_lan": True}],
-                online=True,
-            )
+                if not local_share.local_only:
+                    known = {kp.peer_id
+                             for kp in self._db.list_all_known_peers(share_id)}
+                    if peer_id not in known:
+                        log.debug("LAN peer %s not in ACL cache for share %s - skip",
+                                  peer_id[:8], share_id[:8])
+                        continue
+                log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
+                         share_id[:8], peer_id[:8], host, port)
+                self._lt.add_peer(share_id, host, port)
+                self._db.upsert_peer(
+                    share_id,
+                    peer_id,
+                    [{"host": host, "port": port, "is_lan": True}],
+                    online=True,
+                )
+        except Exception:
+            log.exception("_on_lan_peer failed peer=%s shares=%s",
+                          peer_id[:8], [s[:8] for s in share_ids])
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
