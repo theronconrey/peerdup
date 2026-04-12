@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import socket
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +36,9 @@ log = logging.getLogger(__name__)
 
 # How often to re-announce even without a file change.
 ANNOUNCE_INTERVAL_SECONDS = 120
+# Minimum gap between torrent rebuilds for the same share. Coalesces bursts of
+# FS events (e.g. a folder rename with N files) into at most 2 rebuilds.
+_REBUILD_DEBOUNCE_SECS = 2.0
 # TTL sent to registry; re-announce before this expires.
 ANNOUNCE_TTL_SECONDS      = 300
 
@@ -73,6 +77,16 @@ class SyncCoordinator:
 
         # Control event bus for the ControlService to subscribe to.
         self._control_subscribers: list[asyncio.Queue] = []
+
+        # share_ids currently mid-switch (prevents concurrent _switch_to_remote_torrent
+        # calls from racing on DB state and libtorrent handles).
+        self._switching: set[str] = set()
+
+        # Per-share rebuild debounce: timestamp of last rebuild and any pending
+        # follow-up task. Prevents a burst of FS events (e.g. folder rename with
+        # N files) from triggering N full torrent rebuilds.
+        self._last_rebuild:   dict[str, float]                  = {}
+        self._pending_rebuild: dict[str, asyncio.Task[None]]    = {}
 
         self._file_watcher: FileWatcher | None = None
         self._lan = None   # LanDiscovery, set in start() if enabled
@@ -142,7 +156,12 @@ class SyncCoordinator:
         self._stop_event.set()
         for stop_ev in self._watch_stop.values():
             stop_ev.set()
-        for task in list(self._watch_tasks.values()) + list(self._announce_tasks.values()):
+        all_tasks = (
+            list(self._watch_tasks.values())
+            + list(self._announce_tasks.values())
+            + [t for t in self._pending_rebuild.values() if not t.done()]
+        )
+        for task in all_tasks:
             task.cancel()
         if self._file_watcher:
             self._file_watcher.stop()
@@ -310,6 +329,11 @@ class SyncCoordinator:
         atask = self._announce_tasks.pop(share_id, None)
         if atask:
             atask.cancel()
+
+        ptask = self._pending_rebuild.pop(share_id, None)
+        if ptask and not ptask.done():
+            ptask.cancel()
+        self._last_rebuild.pop(share_id, None)
 
         # Stop watching filesystem.
         if self._file_watcher:
@@ -822,6 +846,18 @@ class SyncCoordinator:
         Drop our current torrent handle and re-add with the remote peer's
         info_hash so libtorrent fetches metadata + content from them.
         """
+        if share_id in self._switching:
+            log.debug("Switch already in progress for share=%s - skipping duplicate",
+                      share_id[:8])
+            return
+        self._switching.add(share_id)
+        try:
+            await self._do_switch_to_remote_torrent(share_id, remote_info_hash)
+        finally:
+            self._switching.discard(share_id)
+
+    async def _do_switch_to_remote_torrent(self, share_id: str,
+                                           remote_info_hash: str) -> None:
         share = self._db.get_share(share_id)
         if not share:
             return
@@ -874,10 +910,14 @@ class SyncCoordinator:
         if self._file_watcher:
             self._file_watcher.add_share(share_id, local_path)
 
-        has_files = any(
-            True for f in Path(local_path).rglob("*")
-            if Path(f).is_file()
-        ) if Path(local_path).exists() else False
+        loop = asyncio.get_running_loop()
+        has_files = await loop.run_in_executor(
+            None,
+            lambda: (
+                Path(local_path).exists()
+                and any(f.is_file() for f in Path(local_path).rglob("*"))
+            ),
+        )
 
         torrent_path = os.path.join(
             self._data_dir, "torrents", f"{share_id}.torrent"
@@ -1033,6 +1073,7 @@ class SyncCoordinator:
 
         # Update file index.
         local_path = Path(share.local_path) / evt.rel_path
+        loop = asyncio.get_running_loop()
         if evt.change_type == "deleted":
             self._db.delete_file(evt.share_id, evt.rel_path)
         elif evt.change_type == "moved" and evt.dest_path:
@@ -1040,7 +1081,7 @@ class SyncCoordinator:
             self._db.delete_file(evt.share_id, evt.rel_path)
             dest_abs = Path(share.local_path) / evt.dest_path
             try:
-                st = dest_abs.stat()
+                st = await loop.run_in_executor(None, dest_abs.stat)
                 self._db.upsert_file(
                     evt.share_id, evt.dest_path,
                     size=st.st_size, mtime_ns=st.st_mtime_ns
@@ -1049,7 +1090,7 @@ class SyncCoordinator:
                 pass  # dest vanished between event and handling - torrent rebuild still proceeds
         else:
             try:
-                st = local_path.stat()
+                st = await loop.run_in_executor(None, local_path.stat)
                 self._db.upsert_file(
                     evt.share_id, evt.rel_path,
                     size=st.st_size, mtime_ns=st.st_mtime_ns
@@ -1057,9 +1098,46 @@ class SyncCoordinator:
             except FileNotFoundError:
                 return
 
-        # Rebuild torrent and re-announce.
+        # Rebuild torrent and re-announce, with a per-share debounce so that a
+        # burst of events (e.g. a folder rename with N files) produces at most 2
+        # rebuilds instead of N.
+        now  = time.monotonic()
+        last = self._last_rebuild.get(evt.share_id, 0.0)
+        if now - last < _REBUILD_DEBOUNCE_SECS:
+            # A rebuild just happened. Cancel any pending follow-up and reschedule
+            # so we coalesce the burst into a single deferred rebuild.
+            existing = self._pending_rebuild.pop(evt.share_id, None)
+            if existing and not existing.done():
+                existing.cancel()
+            delay = _REBUILD_DEBOUNCE_SECS - (now - last)
+            sid   = evt.share_id
+            local_path_str = share.local_path
+            local_only     = share.local_only
+
+            async def _deferred_rebuild():
+                await asyncio.sleep(delay)
+                self._pending_rebuild.pop(sid, None)
+                # Re-read share in case it was removed while we were waiting.
+                s = self._db.get_share(sid)
+                if s and s.state != ShareState.PAUSED and s.state != ShareState.SYNCING:
+                    await self._do_rebuild_torrent(sid, local_path_str, local_only)
+
+            task = asyncio.create_task(
+                _deferred_rebuild(), name=f"rebuild-{evt.share_id[:8]}"
+            )
+            self._pending_rebuild[evt.share_id] = task
+            log.debug("Rebuild debounced share=%s retry in %.1fs",
+                      evt.share_id[:8], delay)
+            return
+
+        self._last_rebuild[evt.share_id] = now
+        await self._do_rebuild_torrent(evt.share_id, share.local_path, share.local_only)
+
+    async def _do_rebuild_torrent(self, share_id: str, local_path: str,
+                                  local_only: bool) -> None:
+        """Rebuild the torrent, update DB, and re-announce. Called after FS changes."""
         torrent_path = os.path.join(
-            self._data_dir, "torrents", f"{evt.share_id}.torrent"
+            self._data_dir, "torrents", f"{share_id}.torrent"
         )
         try:
             # Delete the cached .torrent file so add_share always rebuilds from
@@ -1074,35 +1152,34 @@ class SyncCoordinator:
                 log.debug("Could not remove stale torrent file %s", torrent_path)
 
             # Remove old handle and re-add with fresh metadata.
-            self._lt.remove_share(evt.share_id, delete_files=False)
+            self._lt.remove_share(share_id, delete_files=False)
             loop = asyncio.get_running_loop()
             ih = await loop.run_in_executor(
                 None,
                 functools.partial(
                     self._lt.add_share,
-                    evt.share_id, share.local_path,
+                    share_id, local_path,
                     torrent_path=torrent_path,
                     seed_mode=True,
                 ),
             )
-            new_seq = self._db.increment_share_seq(evt.share_id)
-            self._db.set_share_state(evt.share_id, ShareState.SEEDING,
-                                     info_hash=ih)
+            new_seq = self._db.increment_share_seq(share_id)
+            self._db.set_share_state(share_id, ShareState.SEEDING, info_hash=ih)
+            self._last_rebuild[share_id] = time.monotonic()
             log.debug("Torrent rebuilt share=%s info_hash=%s seq=%d",
-                      evt.share_id[:8], ih, new_seq)
+                      share_id[:8], ih, new_seq)
 
             # Re-inject known peers.
-            for kp in self._db.get_online_peers(evt.share_id):
+            for kp in self._db.get_online_peers(share_id):
                 for addr in json.loads(kp.addresses):
-                    self._lt.add_peer(evt.share_id, addr["host"], addr["port"])
+                    self._lt.add_peer(share_id, addr["host"], addr["port"])
 
             # Announce immediately (registry shares only).
-            if not share.local_only:
-                await self._announce(evt.share_id)
+            if not local_only:
+                await self._announce(share_id)
 
         except Exception:
-            log.exception("Failed to update torrent after fs event share=%s",
-                          evt.share_id)
+            log.exception("Failed to update torrent after fs event share=%s", share_id)
 
     # ── Status update loop ────────────────────────────────────────────────────
 
@@ -1186,6 +1263,41 @@ class SyncCoordinator:
         if not torrent_files:
             return
 
+        # Collect the set of DB-tracked paths before entering the executor so
+        # we don't call _db from a thread.
+        tracked_paths = {local_path / db_file.rel_path
+                         for db_file in self._db.get_files(share_id)}
+
+        # All filesystem work (rglob, stat, rename, unlink, rmdir) runs in a
+        # thread pool executor so it cannot block the event loop on large shares
+        # or slow storage (NFS, spinning disk, etc.).
+        loop = asyncio.get_running_loop()
+        moved_any = await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._preposition_files,
+                share_id, local_path, save_path, torrent_files, tracked_paths,
+            ),
+        )
+
+        if moved_any:
+            self._lt.force_recheck(share_id)
+            log.info("Pre-positioning complete share=%s forcing recheck", share_id[:8])
+
+    @staticmethod
+    def _preposition_files(
+        share_id:      str,
+        local_path:    Path,
+        save_path:     Path,
+        torrent_files: list[tuple[str, int]],
+        tracked_paths: set[Path],
+    ) -> bool:
+        """
+        Synchronous pre-positioning work, safe to run in a thread pool executor.
+
+        Returns True if any file was moved or deleted (so the caller knows to
+        call force_recheck on the libtorrent handle).
+        """
         # Index all existing local files by (basename, size).
         local_index: dict[tuple[str, int], Path] = {}
         if local_path.exists():
@@ -1233,22 +1345,22 @@ class SyncCoordinator:
             except OSError:
                 pass  # not empty or already gone - fine
 
-        # Remove any local files that are not in the new torrent layout (orphans
-        # from prior sync states - stale folders left by previous renames).
-        expected_paths = {save_path / rel_path for rel_path, _ in torrent_files}
-        if local_path.exists():
-            for f in local_path.rglob("*"):
-                if f.is_file() and f not in expected_paths:
-                    try:
-                        f.unlink()
-                        log.info("Removed orphan file share=%s %s",
-                                 share_id[:8], f.relative_to(local_path))
-                        moved_any = True
-                    except Exception as exc:
-                        log.debug("Could not remove orphan %s: %s", f, exc)
+        # Remove tracked files that are no longer in the new torrent layout.
+        # Only delete files peerdup itself placed here (in the DB) — never touch
+        # user files that exist in the share directory but are not tracked.
+        new_layout = {save_path / rel_path for rel_path, _ in torrent_files}
+        for f in tracked_paths:
+            if f not in new_layout and f.exists():
+                try:
+                    f.unlink()
+                    log.info("Removed stale tracked file share=%s %s",
+                             share_id[:8], f.relative_to(local_path))
+                    moved_any = True
+                except Exception as exc:
+                    log.debug("Could not remove stale file %s: %s", f, exc)
 
         # Remove all empty directories under share root (catches any stale dirs
-        # left after orphan removal or incomplete prior pre-positioning passes).
+        # left after stale-file removal or incomplete prior pre-positioning passes).
         if local_path.exists():
             for d in sorted(
                 [p for p in local_path.rglob("*") if p.is_dir()],
@@ -1260,9 +1372,7 @@ class SyncCoordinator:
                 except OSError:
                     pass
 
-        if moved_any:
-            self._lt.force_recheck(share_id)
-            log.info("Pre-positioning complete share=%s forcing recheck", share_id[:8])
+        return moved_any
 
     # ── LAN discovery ─────────────────────────────────────────────────────────
 
