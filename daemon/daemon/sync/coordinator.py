@@ -1233,6 +1233,33 @@ class SyncCoordinator:
             except OSError:
                 pass  # not empty or already gone - fine
 
+        # Remove any local files that are not in the new torrent layout (orphans
+        # from prior sync states - stale folders left by previous renames).
+        expected_paths = {save_path / rel_path for rel_path, _ in torrent_files}
+        if local_path.exists():
+            for f in local_path.rglob("*"):
+                if f.is_file() and f not in expected_paths:
+                    try:
+                        f.unlink()
+                        log.info("Removed orphan file share=%s %s",
+                                 share_id[:8], f.relative_to(local_path))
+                        moved_any = True
+                    except Exception as exc:
+                        log.debug("Could not remove orphan %s: %s", f, exc)
+
+        # Remove all empty directories under share root (catches any stale dirs
+        # left after orphan removal or incomplete prior pre-positioning passes).
+        if local_path.exists():
+            for d in sorted(
+                [p for p in local_path.rglob("*") if p.is_dir()],
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+
         if moved_any:
             self._lt.force_recheck(share_id)
             log.info("Pre-positioning complete share=%s forcing recheck", share_id[:8])
