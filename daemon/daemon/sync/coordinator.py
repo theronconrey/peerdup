@@ -842,6 +842,12 @@ class SyncCoordinator:
         # to see a mismatch and switch back, undoing the change).
         self._db.set_share_state(share_id, ShareState.SYNCING,
                                  info_hash=remote_info_hash)
+        # Pause the file watcher so that inotify events from pre-positioning
+        # (file moves that rearrange existing content into the new layout) do
+        # not fire _handle_fs_event once we transition back to SEEDING.
+        # The watcher is re-enabled in _status_update_loop on SEEDING transition.
+        if self._file_watcher:
+            self._file_watcher.remove_share(share_id)
         self._lt.remove_share(share_id, delete_files=False)
         try:
             loop = asyncio.get_running_loop()
@@ -1117,24 +1123,13 @@ class SyncCoordinator:
                         )
                         log.info("Share download complete share=%s ih=%s",
                                  status.share_id[:8], status.info_hash[:8])
-                        # Drain queued fs events for this share. They were
-                        # generated during SYNCING (e.g. from pre-positioning
-                        # file moves) and must not trigger a torrent rebuild
-                        # now that we're SEEDING — that would increment seq
-                        # and start a ping-pong with the peer we just synced from.
-                        kept = []
-                        while not self._fs_queue.empty():
-                            try:
-                                queued = self._fs_queue.get_nowait()
-                                if queued.share_id != status.share_id:
-                                    kept.append(queued)
-                            except asyncio.QueueEmpty:
-                                break
-                        for q in kept:
-                            await self._fs_queue.put(q)
-                        if len(kept) < self._fs_queue.qsize() + len(kept):
-                            log.debug("Drained stale fs events after download share=%s",
-                                      status.share_id[:8])
+                        # Re-enable the file watcher now that we're SEEDING.
+                        # It was paused in _switch_to_remote_torrent to prevent
+                        # pre-positioning file moves from triggering a rebuild.
+                        if self._file_watcher:
+                            self._file_watcher.add_share(
+                                status.share_id, share.local_path
+                            )
 
                 await self._publish_control_event({
                     "type":    "sync_progress",
