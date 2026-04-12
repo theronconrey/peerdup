@@ -58,13 +58,16 @@ prompt_yn() {
         [yY]*) hint="Y/n" ;;
         *)     hint="y/N" ;;
     esac
-    printf '%s [%s]: ' "$msg" "$hint"
-    read -r value
-    value="${value:-$default}"
-    case "$value" in
-        [yY]|[yY][eE][sS]) eval "$var=true"  ;;
-        *)                  eval "$var=false" ;;
-    esac
+    while true; do
+        printf '%s [%s]: ' "$msg" "$hint"
+        read -r value
+        value="${value:-$default}"
+        case "$value" in
+            [yY]|[yY][eE][sS]) eval "$var=true";  return ;;
+            [nN]|[nN][oO])     eval "$var=false"; return ;;
+            *) printf '  please enter y or n\n' ;;
+        esac
+    done
 }
 
 # ── systemd detection ─────────────────────────────────────────────────────────
