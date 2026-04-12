@@ -268,18 +268,33 @@ class LanDiscovery:
     # ── Announce loop ─────────────────────────────────────────────────────────
 
     async def _announce_loop(self):
-        """Broadcast a signed packet immediately, then every interval seconds."""
+        """
+        Broadcast a signed packet immediately, then every interval seconds.
+
+        Sends to both the multicast group AND the subnet broadcast address so
+        that peers on WiFi can reach peers on wired ethernet (and vice versa)
+        even when the AP does not forward multicast across the wired/wireless
+        boundary.
+        """
+        loop = asyncio.get_running_loop()
+        port = self._config.multicast_port
+        dests = [
+            (self._config.multicast_group, port),
+            ("255.255.255.255", port),
+        ]
         while True:
             try:
                 share_ids = self._get_share_ids()
                 if share_ids:
                     packet = pack_packet(self._identity, share_ids,
                                          self._listen_port)
-                    dest = (self._config.multicast_group,
-                            self._config.multicast_port)
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, self._sender_sock.sendto, packet, dest
-                    )
+                    for dest in dests:
+                        try:
+                            await loop.run_in_executor(
+                                None, self._sender_sock.sendto, packet, dest
+                            )
+                        except Exception:
+                            log.debug("LAN announce to %s failed", dest[0])
                     log.debug("LAN announce sent shares=%d bytes=%d",
                               len(share_ids), len(packet))
             except asyncio.CancelledError:
@@ -339,6 +354,10 @@ class LanDiscovery:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
         # Enable loopback so tests on a single host work.
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        # Enable broadcast so we can send to 255.255.255.255 as a fallback
+        # for networks where the AP doesn't forward multicast across the
+        # wired/wireless boundary.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         if self._iface:
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
