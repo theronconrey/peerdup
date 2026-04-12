@@ -7,25 +7,22 @@ discovery; all transfers are direct peer-to-peer via libtorrent.
 
 ## How it works
 
-```
-┌─────────────────┐
-│    Registry     │   gRPC / TLS  - peer discovery, ACL, presence (optional)
-└────────┬────────┘
-         │ announce / WatchSharePeers
-  ┌──────┴──────┐
-  │             │
-┌─┴──────┐  ┌──┴─────┐
-│Daemon A│◄─►Daemon B│  direct P2P via libtorrent
-└──┬─────┘  └────────┘
-   │    ╲       ╱        relay path (symmetric NAT fallback, optional)
-   │     ╲     ╱
-   │   ┌──┴─┴──┐
-   │   │ Relay │
-   │   └───────┘
-   ▼ Unix socket
-┌──┴──────────┐
-│ peerdup CLI │
-└─────────────┘
+```mermaid
+graph TD
+    R["<b>Registry</b><br/>gRPC / TLS<br/><i>peer discovery · ACL · presence</i><br/><i>(optional)</i>"]
+
+    R -->|"announce / WatchSharePeers"| DA
+    R -->|"announce / WatchSharePeers"| DB
+
+    DA["<b>Daemon A</b><br/>libtorrent"]
+    DB["<b>Daemon B</b><br/>libtorrent"]
+
+    DA <-->|"direct P2P"| DB
+
+    DA -. "relay fallback<br/>(symmetric NAT)" .-> RL["<b>Relay</b><br/>(optional)"]
+    DB -. "relay fallback<br/>(symmetric NAT)" .-> RL
+
+    DA -->|"Unix socket"| CLI["<b>peerdup CLI</b>"]
 ```
 
 Two sync modes:
