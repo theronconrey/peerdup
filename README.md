@@ -141,11 +141,27 @@ The socket path is auto-detected from `$XDG_RUNTIME_DIR` (user installs) or
 
 `peerdup share list` shows a `MODE` column (`registry` or `local`) for each share.
 
+## Sync behavior
+
+Changes on any peer replicate to all others - there is no designated
+source-of-truth machine. Every peer can read and write.
+
+Each local change increments a monotonic sequence number. When two peers have
+different versions of a share, the one with the higher sequence number wins.
+This means the most recently modified peer's state propagates rather than an
+arbitrary one.
+
+Folder renames and file moves are efficient: when a peer receives a new torrent
+layout, peerdup matches existing files by name and size and moves them into
+place before libtorrent checks pieces. Files that don't transfer at all - they
+just get repositioned. Stale files and empty directories from prior layouts are
+cleaned up automatically.
+
 ## Conflict resolution
 
-When two peers independently modify the same file, peerdup detects the
-divergence via mismatched libtorrent info-hashes and applies the share's
-conflict strategy:
+When two peers independently modify the same share before either has seen the
+other's changes, peerdup detects the divergence via mismatched sequence numbers
+and info-hashes and applies the share's conflict strategy:
 
 | Strategy | Behaviour |
 |----------|-----------|
