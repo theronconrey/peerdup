@@ -8,9 +8,9 @@ log_level    = "INFO"
 max_workers  = 10
 
 [tls]
-# Set enabled = true for any non-loopback deployment.
-# Generate dev certs with: make cert
-enabled   = false
+# TLS is enabled by default. Generate dev certs with: make cert
+# Set enabled = false only for loopback-only development setups.
+enabled   = true
 cert_file = "server.crt"
 key_file  = "server.key"
 

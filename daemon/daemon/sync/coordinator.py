@@ -250,6 +250,11 @@ class SyncCoordinator:
             raise PermissionError(
                 f"You are not the owner of share {share_id}"
             )
+        if share.local_only:
+            raise ValueError(
+                f"Share {share_id} is local-only. "
+                "Access control is managed via LAN discovery, not the registry."
+            )
 
         # Map permission string to registry proto value.
         perm_map = {
@@ -282,6 +287,11 @@ class SyncCoordinator:
             raise KeyError(f"Share {share_id} not found locally")
         if not share.is_owner:
             raise PermissionError(f"You are not the owner of share {share_id}")
+        if share.local_only:
+            raise ValueError(
+                f"Share {share_id} is local-only. "
+                "Access control is managed via LAN discovery, not the registry."
+            )
 
         try:
             self._registry.remove_peer_from_share(share_id, peer_id)
@@ -497,22 +507,23 @@ class SyncCoordinator:
 
         lt_status = self._lt.get_status(share_id)
 
-        # Registry metadata (best-effort).
+        # Registry metadata (best-effort, registry shares only).
         owner_id   = ""
         created_at = ""
         total_peers = 0
-        try:
-            share_proto = self._registry.get_share(share_id)
-            owner_id    = share_proto.owner_id
-            total_peers = len(share_proto.peers)
-            ts = share_proto.created_at
-            if ts.seconds:
-                from datetime import datetime, timezone
-                created_at = datetime.fromtimestamp(
-                    ts.seconds + ts.nanos / 1e9, tz=timezone.utc
-                ).isoformat()
-        except Exception:
-            pass
+        if not local_share.local_only:
+            try:
+                share_proto = self._registry.get_share(share_id)
+                owner_id    = share_proto.owner_id
+                total_peers = len(share_proto.peers)
+                ts = share_proto.created_at
+                if ts.seconds:
+                    from datetime import datetime, timezone
+                    created_at = datetime.fromtimestamp(
+                        ts.seconds + ts.nanos / 1e9, tz=timezone.utc
+                    ).isoformat()
+            except Exception:
+                pass
 
         peers_online = len(self._db.get_online_peers(share_id))
 

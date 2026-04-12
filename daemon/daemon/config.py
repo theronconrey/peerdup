@@ -199,9 +199,18 @@ def _from_dict(raw: dict) -> Config:
         for s in raw.get("shares", [])
     ]
 
+    # Build registry config, then apply smart TLS default: if an address is
+    # configured but `tls` was not explicitly set in the TOML, default to True.
+    # Operators using a plaintext-only local registry must set tls = false.
+    reg_raw  = raw.get("registry", {})
+    registry = RegistryConfig(**{k: v for k, v in reg_raw.items()
+                                 if k in RegistryConfig.__dataclass_fields__})
+    if registry.address and "tls" not in reg_raw:
+        registry.tls = True
+
     return Config(
         daemon     = sub(DaemonConfig,     "daemon"),
-        registry   = sub(RegistryConfig,   "registry"),
+        registry   = registry,
         identity   = sub(IdentityConfig,   "identity"),
         libtorrent = sub(LibtorrentConfig, "libtorrent"),
         lan        = sub(LanConfig,        "lan"),
@@ -253,6 +262,8 @@ def _resolve_paths(cfg: Config):
 
 
 def _validate(cfg: Config):
+    import logging as _logging
+
     valid_perms = {"rw", "ro", "encrypted"}
     for share in cfg.shares:
         if share.permission not in valid_perms:
@@ -263,3 +274,9 @@ def _validate(cfg: Config):
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     if cfg.logging.level.upper() not in valid_levels:
         raise ValueError(f"Invalid log level: {cfg.logging.level}")
+
+    if cfg.registry.address and not cfg.registry.tls:
+        _logging.getLogger(__name__).warning(
+            "Registry address is set but TLS is disabled — "
+            "set [registry] tls = true for any non-loopback deployment."
+        )
