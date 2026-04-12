@@ -56,6 +56,15 @@ Prompts for your machine name, registry address, relay/LAN settings, and
 optionally CA/client certificate paths for mTLS. Starts the daemon. Leave
 registry blank if you're using local-only shares.
 
+To change settings later (add a relay, update the registry address, etc.):
+
+```bash
+peerdup-setup --update
+```
+
+Runs the same wizard with all current values pre-filled. Press Enter to keep
+any setting, or type a new value to change it.
+
 ### 4. Share a folder
 
 #### With a registry (access-controlled)
