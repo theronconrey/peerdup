@@ -105,6 +105,33 @@ if [ ! -f "$CONFIG_FILE" ]; then
     printf '\n'
     prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "y"
 
+    LAN_INTERFACE=""
+    if [ "$LAN_ENABLED" = "true" ]; then
+        DETECTED_IFACE=$(python3 -c "
+import socket
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('8.8.8.8', 80))
+    print(s.getsockname()[0])
+    s.close()
+except Exception:
+    print('')
+" 2>/dev/null)
+
+        printf '\n'
+        if [ -n "$DETECTED_IFACE" ]; then
+            printf 'Detected LAN interface: \033[1m%s\033[0m\n' "$DETECTED_IFACE"
+            printf 'Press Enter to use this, or type a different IP (e.g. 192.168.1.50): '
+            read -r iface_input
+            LAN_INTERFACE="${iface_input:-$DETECTED_IFACE}"
+        else
+            printf 'Could not auto-detect LAN interface.\n'
+            printf 'Enter the IP address of the interface to use for multicast discovery\n'
+            printf '(run `ip -4 addr show` to list options): '
+            read -r LAN_INTERFACE
+        fi
+    fi
+
     printf '\n'
     prompt_optional RELAY_ADDRESS "Relay server address (host:port) for peers behind symmetric NAT"
     if [ -n "$RELAY_ADDRESS" ]; then
@@ -154,6 +181,7 @@ download_rate_limit = 0
 
 [lan]
 enabled           = $LAN_ENABLED
+interface         = "$LAN_INTERFACE"
 announce_interval = 30
 multicast_group   = "239.193.0.0"
 multicast_port    = 49152

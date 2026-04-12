@@ -47,6 +47,25 @@ SIG_LEN      = 64
 _MIN_PACKET  = 1 + PEER_ID_LEN + 2 + 2 + SIG_LEN  # 101 bytes
 
 
+def detect_multicast_interface() -> str:
+    """
+    Return the local IP that would route to the default gateway - the right
+    interface for LAN multicast on most machines.
+
+    Uses a non-sending UDP connect to let the kernel pick the outbound
+    interface, then reads back the source IP. Returns "" on any failure.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
 # ── Packet codec ─────────────────────────────────────────────────────────────
 
 def pack_packet(identity, share_ids: list[str], listen_port: int) -> bytes:
@@ -175,11 +194,31 @@ class LanDiscovery:
         self._transport: asyncio.BaseTransport | None = None
         self._sender_sock: socket.socket | None = None
         self._announce_task: asyncio.Task | None = None
+        self._iface: str = ""   # resolved at start()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self):
         loop = asyncio.get_running_loop()
+
+        # Resolve interface: explicit config wins; otherwise auto-detect.
+        if self._config.interface:
+            self._iface = self._config.interface
+            log.info("LAN discovery using configured interface %s", self._iface)
+        else:
+            self._iface = detect_multicast_interface()
+            if self._iface:
+                log.info(
+                    "LAN discovery auto-detected interface %s "
+                    "(set [lan] interface in config to override)",
+                    self._iface,
+                )
+            else:
+                log.warning(
+                    "LAN discovery could not detect interface - "
+                    "falling back to 0.0.0.0 (multicast may not work on "
+                    "multi-homed hosts; set [lan] interface in config)"
+                )
 
         # Listener socket — bind to the multicast port, join the group.
         listen_sock = self._make_listen_socket()
@@ -284,8 +323,8 @@ class LanDiscovery:
 
         sock.bind(("", self._config.multicast_port))
 
-        # Join multicast group (optionally on a specific interface).
-        iface_ip = self._config.interface or "0.0.0.0"
+        # Join multicast group on the resolved interface.
+        iface_ip = self._iface or "0.0.0.0"
         mreq = (socket.inet_aton(self._config.multicast_group)
                 + socket.inet_aton(iface_ip))
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -298,9 +337,9 @@ class LanDiscovery:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
         # Enable loopback so tests on a single host work.
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        if self._config.interface:
+        if self._iface:
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-                socket.inet_aton(self._config.interface),
+                socket.inet_aton(self._iface),
             )
         return sock
