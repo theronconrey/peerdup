@@ -58,6 +58,8 @@ class LibtorrentSession:
         self._ul_limit      = upload_rate_limit
         self._dl_limit      = download_rate_limit
         self._on_status     = on_status_update
+        # Called with share_id when ut_metadata finishes for a magnet-added torrent.
+        self._on_metadata: Callable[[str], None] | None = None
 
         self._session       = None
         self._handles:       dict[str, object] = {}  # share_id -> lt.torrent_handle
@@ -229,6 +231,33 @@ class LibtorrentSession:
                     for sid, h in self._handles.items()
                     if h.is_valid()]
 
+    def force_recheck(self, share_id: str):
+        """Force libtorrent to re-hash all pieces for a share."""
+        with self._lock:
+            handle = self._handles.get(share_id)
+            if handle and handle.is_valid():
+                handle.force_recheck()
+                log.debug("Force recheck share=%s", share_id)
+
+    def get_torrent_file_list(self, share_id: str) -> list[tuple[str, int]]:
+        """
+        Return (relative_path, size_bytes) for each file in a share's torrent.
+        Paths are relative to the session save_path (i.e. include the top-level
+        share directory name). Returns [] if metadata not yet available.
+        """
+        with self._lock:
+            handle = self._handles.get(share_id)
+            if not handle or not handle.is_valid():
+                return []
+            ti = handle.torrent_file()
+            if not ti:
+                return []
+            files = ti.files()
+            return [
+                (files.file_path(i), files.file_size(i))
+                for i in range(files.num_files())
+            ]
+
     # ── Alert loop ────────────────────────────────────────────────────────────
 
     def _alert_loop(self):
@@ -246,7 +275,8 @@ class LibtorrentSession:
         cat = type(alert).__name__
 
         if cat in ("torrent_finished_alert", "torrent_error_alert",
-                   "state_changed_alert", "block_finished_alert"):
+                   "state_changed_alert", "block_finished_alert",
+                   "metadata_received_alert"):
             # Find which share this handle belongs to.
             handle = getattr(alert, "handle", None)
             if not handle:
@@ -256,13 +286,19 @@ class LibtorrentSession:
                     (sid for sid, h in self._handles.items()
                      if h == handle), None
                 )
-            if share_id and self._on_status:
-                status = self.get_status(share_id)
-                if status:
+            if share_id:
+                if cat == "metadata_received_alert" and self._on_metadata:
                     try:
-                        self._on_status(status)
+                        self._on_metadata(share_id)
                     except Exception:
-                        log.exception("on_status_update callback failed")
+                        log.exception("on_metadata callback failed share=%s", share_id)
+                elif self._on_status:
+                    status = self.get_status(share_id)
+                    if status:
+                        try:
+                            self._on_status(status)
+                        except Exception:
+                            log.exception("on_status_update callback failed")
 
         if cat == "torrent_error_alert":
             log.error("libtorrent error: %s", alert.message())

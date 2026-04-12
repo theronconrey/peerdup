@@ -97,6 +97,17 @@ class SyncCoordinator:
             loop.call_soon_threadsafe(self._status_queue.put_nowait, status)
 
         self._lt._on_status = _lt_bridge
+
+        # Bridge libtorrent metadata_received alerts → pre-positioning coroutine.
+        def _metadata_bridge(share_id: str):
+            loop.call_soon_threadsafe(
+                lambda: loop.create_task(
+                    self._on_metadata_received(share_id),
+                    name=f"preposition-{share_id[:8]}",
+                )
+            )
+
+        self._lt._on_metadata = _metadata_bridge
         self._lt.start()
 
         # Start background tasks immediately so the control socket is usable.
@@ -1085,6 +1096,61 @@ class SyncCoordinator:
                 q.put_nowait(event)
             except asyncio.QueueFull:
                 pass
+
+    # ── Torrent pre-positioning ───────────────────────────────────────────────
+
+    async def _on_metadata_received(self, share_id: str):
+        """
+        Called when libtorrent receives torrent metadata via ut_metadata (BEP 9).
+
+        Before libtorrent starts downloading, scan the local share directory for
+        files that match the torrent's expected content by name and size. Move any
+        matches into their expected positions so libtorrent's piece-check finds
+        them already in place and skips the download for those pieces.
+
+        This makes folder renames and file moves free — no re-transfer needed.
+        """
+        local_share = self._db.get_share(share_id)
+        if not local_share:
+            return
+
+        local_path = Path(local_share.local_path)
+        save_path  = local_path.parent   # matches libtorrent's save_path
+
+        torrent_files = self._lt.get_torrent_file_list(share_id)
+        if not torrent_files:
+            return
+
+        # Index all existing local files by (basename, size).
+        local_index: dict[tuple[str, int], Path] = {}
+        if local_path.exists():
+            for f in local_path.rglob("*"):
+                if f.is_file():
+                    try:
+                        local_index[(f.name, f.stat().st_size)] = f
+                    except OSError:
+                        pass
+
+        moved_any = False
+        for rel_path, size in torrent_files:
+            expected = save_path / rel_path
+            if expected.exists():
+                continue   # already in place
+
+            src = local_index.get((expected.name, size))
+            if src and src.exists():
+                try:
+                    expected.parent.mkdir(parents=True, exist_ok=True)
+                    src.rename(expected)
+                    log.info("Pre-positioned share=%s %s -> %s",
+                             share_id[:8], src.relative_to(save_path), rel_path)
+                    moved_any = True
+                except Exception as exc:
+                    log.debug("Could not pre-position %s: %s", src, exc)
+
+        if moved_any:
+            self._lt.force_recheck(share_id)
+            log.info("Pre-positioning complete share=%s forcing recheck", share_id[:8])
 
     # ── LAN discovery ─────────────────────────────────────────────────────────
 
