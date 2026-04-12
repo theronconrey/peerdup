@@ -112,7 +112,7 @@ info "Generating daemon gRPC stubs..."
     --grpc_python_out=daemon \
     proto/control.proto && \
     sed -i 's/^import control_pb2 as control__pb2$/from daemon import control_pb2 as control__pb2/' \
-        daemon/daemon/control_pb2_grpc.py)
+        daemon/control_pb2_grpc.py)
 ok "Daemon stubs generated"
 
 ln -sf "$INSTALL_DIR/daemon/start.sh" "$BIN_DIR/peerdup-setup"
