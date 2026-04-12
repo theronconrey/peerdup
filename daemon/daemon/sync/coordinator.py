@@ -1184,6 +1184,7 @@ class SyncCoordinator:
                         pass
 
         moved_any = False
+        vacated_dirs: set[Path] = set()
         for rel_path, size in torrent_files:
             expected = save_path / rel_path
             if expected.exists():
@@ -1193,12 +1194,24 @@ class SyncCoordinator:
             if src and src.exists():
                 try:
                     expected.parent.mkdir(parents=True, exist_ok=True)
+                    vacated_dirs.add(src.parent)
                     src.rename(expected)
                     log.info("Pre-positioned share=%s %s -> %s",
                              share_id[:8], src.relative_to(save_path), rel_path)
                     moved_any = True
                 except Exception as exc:
                     log.debug("Could not pre-position %s: %s", src, exc)
+
+        # Remove directories that were emptied by pre-positioning (e.g. a
+        # renamed folder whose files were all moved to the new path).
+        for d in sorted(vacated_dirs, key=lambda p: len(p.parts), reverse=True):
+            if d.is_relative_to(local_path) and d != local_path:
+                try:
+                    d.rmdir()   # only removes if empty
+                    log.info("Removed vacated dir share=%s %s",
+                             share_id[:8], d.relative_to(local_path))
+                except OSError:
+                    pass  # not empty or already gone - fine
 
         if moved_any:
             self._lt.force_recheck(share_id)
