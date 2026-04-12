@@ -55,21 +55,25 @@ Ubuntu/Debian, and macOS.
 peerdup-setup
 ```
 
-On first run prompts for your machine name, registry address, and optional
-relay/LAN settings, then writes `config.toml` and starts the daemon.
+On first run prompts for:
+- Machine name
+- Registry address (leave blank for LAN-only mode)
+- Optional CA certificate for verifying the registry (TLS)
+- Optional client certificate and key for mTLS
+- LAN multicast interface (auto-detected)
+- Optional relay server address for symmetric NAT peers
+- Log level
 
-After the daemon starts successfully, `peerdup-setup` offers to install a
-systemd user service (`~/.config/systemd/user/peerdup-daemon.service`).
-If you accept, subsequent runs of `peerdup-setup` simply restart the unit
-via `systemctl --user restart peerdup-daemon` instead of managing the process
-manually.
+Writes `config.toml` and starts the daemon. After the daemon starts
+successfully, `peerdup-setup` offers to install a systemd user service
+(`~/.config/systemd/user/peerdup-daemon.service`). Subsequent runs of
+`peerdup-setup` simply restart the unit.
 
 You will also be asked whether to enable linger (`loginctl enable-linger`),
 which makes the service start at boot even before you log in - recommended
 for NAS or always-on machines, optional for laptops.
 
 TLS to the registry is enabled automatically when a registry address is set.
-Leave the registry address blank if you only need local-only shares.
 
 The socket path is auto-detected:
 - User installs: `$XDG_RUNTIME_DIR/peerdup/control.sock`
@@ -97,7 +101,7 @@ peerdup identity
 peerdup share list
 peerdup share info   <name-or-id>          # metadata, no peer roster
 peerdup share peers  <name-or-id>          # peer roster: online/offline
-peerdup share create <name> <path>         # create share, print share_id + fingerprint
+peerdup share create <name> <path>         # create share, print share_id
 peerdup share create <name> <path> --local             # local-only, no registry
 peerdup share create <name> <path> --import-key <file> # import existing keypair
 peerdup share create <name> <path> --conflict <strategy>
@@ -113,8 +117,11 @@ peerdup share conflicts    <name-or-id>                       # list pending con
 peerdup share resolve      <conflict-id> keep-local|keep-remote
 peerdup share pause  <name-or-id>
 peerdup share resume <name-or-id>
-peerdup status
+peerdup status                             # snapshot with global transfer rates
 peerdup watch                              # live event stream (includes CONFLICT events)
+
+peerdup registry health                    # probe registry: status, uptime, peer counts
+peerdup registry status                    # daemon's connection state, TLS config
 ```
 
 `peerdup share list` shows a `MODE` column (`registry` or `local`) and a `PEERS`
@@ -122,12 +129,15 @@ column formatted as `active/announced` - active libtorrent connections slash
 registry-announced peers. Live transfer rates are printed below the row when
 non-zero.
 
+`peerdup status` shows a global aggregate transfer rate line when any share is
+actively syncing.
+
 ### Registry flow
 
 ```bash
 # Machine A (owner)
 peerdup share create photos ~/Pictures
-# → prints share_id + fingerprint
+# -> prints share_id
 
 peerdup share grant photos <machine-b-peer-id>
 
@@ -141,7 +151,7 @@ peerdup share peers photos   # verify both online
 ```bash
 # Machine A
 peerdup share create photos ~/Pictures --local
-# → prints share_id
+# -> prints share_id
 
 # Machine B (same LAN)
 peerdup share add <share_id> ~/Pictures --local
@@ -172,19 +182,33 @@ peerdup share resolve 3 keep-remote
 
 `peerdup watch` emits `[CONFLICT]` events in real time.
 
+### Bandwidth policies
+
+Share owners can publish advisory rate limits from the registry via
+`SetSharePolicy`. The daemon applies these to the libtorrent handle
+immediately when they arrive on the `WatchSharePeers` stream, and also
+on share activation.
+
+Per-share local caps set with `peerdup share set-limit` always take
+precedence: if both a registry policy and a local cap are set, the more
+restrictive value is used. Local-only shares ignore registry policy entirely.
+
 ## Component overview
 
 | Module | Responsibility |
 |--------|---------------|
 | `daemon/identity.py` | Ed25519 keypair generation and signing |
-| `daemon/config.py` | TOML config loading with CLI overrides |
+| `daemon/config.py` | TOML config loading; smart TLS default when registry address is set |
 | `daemon/state/db.py` | Local SQLite state (shares, files, known peers, conflicts) |
-| `daemon/registry/client.py` | gRPC registry client + WatchSharePeers reconnect loop |
+| `daemon/registry/client.py` | gRPC registry client; WatchSharePeers reconnect loop; health/status properties |
 | `daemon/watcher/fs.py` | inotify filesystem watcher with debouncing |
-| `daemon/torrent/session.py` | libtorrent session, private swarm, peer injection |
+| `daemon/torrent/session.py` | libtorrent session; private swarm; per-share rate limiting |
 | `daemon/lan/discovery.py` | UDP multicast LAN discovery (239.193.0.0:49152) |
 | `daemon/relay/client.py` | Relay client - pairs with relay server, bridges a local port for libtorrent |
 | `daemon/sync/coordinator.py` | Orchestrates all the above |
+| `daemon/sync/announce.py` | Per-share registry heartbeat tasks and local-addr discovery |
+| `daemon/sync/torrent_mgr.py` | libtorrent handle lifecycle, rebuild debounce, pre-positioning |
+| `daemon/sync/peer_handler.py` | Registry stream events, LAN peer handling, conflict dispatch, policy application |
 | `daemon/control/servicer.py` | ControlService gRPC over Unix socket (for CLI) |
 | `daemon/daemon.py` | Entrypoint, boots all components |
 | `cli/peerdup.py` | CLI tool - thin gRPC client to control socket |
@@ -207,7 +231,8 @@ peers in the ACL cache are accepted.
 accessible only to the daemon's user.
 
 **Transport** - TLS to the registry (enabled automatically when a registry
-address is configured). libtorrent uses protocol encryption between peers.
+address is configured). mTLS is supported via `ca_file`, `cert_file`, and
+`key_file` in `[registry]`. libtorrent uses protocol encryption between peers.
 
 **Local shares** - no registry ACL. Any peer on the same LAN with the
 share_id can join. Use registry shares for anything sensitive.
@@ -247,10 +272,14 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 | `[daemon]` | `data_dir` | `~/.local/share/peerdup` (user) / `/var/lib/peerdup` (root) | State DB + torrent cache |
 | `[daemon]` | `socket_path` | `$XDG_RUNTIME_DIR/peerdup/control.sock` (user) / `/run/peerdup/control.sock` (root) | CLI control socket |
 | `[daemon]` | `listen_port` | `55000` | libtorrent listen port |
-| `[registry]` | `address` | - | `host:port` of registry; TLS is enabled automatically when set |
-| `[identity]` | `key_file` | `~/.local/share/peerdup/identity.key` (user) / `/var/lib/peerdup/identity.key` (root) | Ed25519 private key |
-| `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec) |
-| `[libtorrent]` | `download_rate_limit` | `0` | Global download cap (bytes/sec) |
+| `[registry]` | `address` | - | `host:port` of registry; TLS enabled automatically when set |
+| `[registry]` | `tls` | `true` (when address set) | Enable TLS for registry connection |
+| `[registry]` | `ca_file` | - | CA certificate for verifying registry TLS |
+| `[registry]` | `cert_file` | - | Client certificate for mTLS |
+| `[registry]` | `key_file` | - | Client private key for mTLS |
+| `[identity]` | `key_file` | `~/.local/share/peerdup/identity.key` | Ed25519 private key |
+| `[libtorrent]` | `upload_rate_limit` | `0` | Global upload cap (bytes/sec; 0 = unlimited) |
+| `[libtorrent]` | `download_rate_limit` | `0` | Global download cap (bytes/sec; 0 = unlimited) |
 | `[lan]` | `enabled` | `true` | LAN multicast discovery |
 | `[lan]` | `multicast_group` | `239.193.0.0` | Multicast group |
 | `[lan]` | `multicast_port` | `49152` | Multicast port |

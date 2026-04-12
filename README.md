@@ -71,8 +71,9 @@ background. Subsequent runs restart it without re-prompting.
 peerdup-setup
 ```
 
-Prompts for your machine name, registry address, and optional settings, then
-starts the daemon. Leave registry blank if you're using local-only shares.
+Prompts for your machine name, registry address, relay/LAN settings, and
+optionally CA/client certificate paths for mTLS. Starts the daemon. Leave
+registry blank if you're using local-only shares.
 
 ### 4. Share a folder
 
@@ -93,7 +94,7 @@ peerdup share peers photos
 ```bash
 # Machine A
 peerdup share create photos ~/Pictures --local
-# → prints share_id
+# -> prints share_id
 
 # Machine B (same LAN)
 peerdup share add <share_id> ~/Pictures --local
@@ -134,12 +135,17 @@ peerdup share pause  <name-or-id>
 peerdup share resume <name-or-id>
 peerdup status
 peerdup watch
+
+peerdup registry health   # probe registry status (version, uptime, peer counts)
+peerdup registry status   # show daemon's registry connection and TLS config
 ```
 
 The socket path is auto-detected from `$XDG_RUNTIME_DIR` (user installs) or
 `/run/peerdup/control.sock` (system installs). Override with `PEERDUP_SOCKET`.
 
-`peerdup share list` shows a `MODE` column (`registry` or `local`) for each share.
+`peerdup share list` shows a `MODE` column (`registry` or `local`) and a `PEERS`
+column formatted as `active/announced`. `peerdup status` shows global transfer
+rates when any share is actively syncing.
 
 ## Sync behavior
 
@@ -153,9 +159,9 @@ arbitrary one.
 
 Folder renames and file moves are efficient: when a peer receives a new torrent
 layout, peerdup matches existing files by name and size and moves them into
-place before libtorrent checks pieces. Files that don't transfer at all - they
-just get repositioned. Stale files and empty directories from prior layouts are
-cleaned up automatically.
+place before libtorrent checks pieces. Files that don't need to change don't
+transfer at all - they just get repositioned. Stale files and empty directories
+from prior layouts are cleaned up automatically.
 
 ## Conflict resolution
 
@@ -178,6 +184,16 @@ peerdup share resolve 3 keep-remote
 ```
 
 `peerdup watch` emits `[CONFLICT]` events in real time.
+
+## Bandwidth policies
+
+Share owners can publish advisory rate limits from the registry. All members
+receive the policy immediately via the live peer event stream and apply it to
+their libtorrent handle. Local per-share caps (`peerdup share set-limit`) always
+take precedence - if both are set, the more restrictive value wins. Local-only
+shares ignore registry policy entirely.
+
+Policy is advisory: daemons are expected to honor it but are not required to.
 
 ## Relay
 
@@ -207,17 +223,18 @@ or reinstall it manually:
 ~/.local/share/peerdup/gnome-extension/install.sh
 ```
 
-The icon in the top bar reflects the current state:
+The top bar shows:
 
-| Icon | Meaning |
-|------|---------|
+| State | Meaning |
+|-------|---------|
 | Idle | Daemon running, all shares up to date |
-| Syncing | Active transfer in progress |
+| Syncing | Active transfer in progress (rates shown inline: `↑1.2M ↓4.8M`) |
 | Error | Daemon unavailable or a share has an error |
 
-Click the icon to see per-share status (peers, progress, transfer rates) and
-to pause/resume individual shares. If `zenity` is installed, the menu also
-offers **New share...** and **Join share...** dialogs.
+The popup menu shows per-share status (peers, progress, transfer rates) and a
+registry health indicator (green dot = connected and healthy, yellow = degraded,
+red = unreachable). If `zenity` is installed, the menu also offers **New
+share...** and **Join share...** dialogs.
 
 Requires GNOME Shell 45+ and the peerdup daemon running on the same user
 account.
