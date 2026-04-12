@@ -44,7 +44,7 @@ printf 'Skip the registry if you already have one running elsewhere,\n'
 printf 'or if you only need local-only shares (no registry needed for those).\n\n'
 
 printf 'Install the registry on this machine? [y/N]: '
-read -r INSTALL_REGISTRY
+read -r INSTALL_REGISTRY </dev/tty
 case "$INSTALL_REGISTRY" in
     [yY]|[yY][eE][sS]) INSTALL_REGISTRY=1 ;;
     *) INSTALL_REGISTRY=0 ;;
