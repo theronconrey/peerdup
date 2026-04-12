@@ -1218,10 +1218,8 @@ class SyncCoordinator:
                 )
 
                 local_ih = local_share.info_hash or ""
-                if (remote_ih and local_ih and remote_ih != local_ih
-                        and not local_share.is_owner):
-                    # Remote peer has different content and we're not the owner
-                    # - apply conflict strategy (usually switch to remote).
+                if remote_ih and local_ih and remote_ih != local_ih:
+                    # Remote peer has different content - apply conflict strategy.
                     log.info("LAN info_hash mismatch share=%s peer=%s "
                              "local=%s remote=%s",
                              share_id[:8], peer_id[:8], local_ih[:8], remote_ih[:8])
@@ -1229,8 +1227,7 @@ class SyncCoordinator:
                         share_id, remote_ih, peer_id, local_share,
                     )
                 else:
-                    # Same torrent, owner (never accepts remote hash), or one side
-                    # has no content yet - inject the peer address.
+                    # Same torrent or one side has no content yet - inject peer.
                     log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
                              share_id[:8], peer_id[:8], host, port)
                     self._lt.add_peer(share_id, host, port)
