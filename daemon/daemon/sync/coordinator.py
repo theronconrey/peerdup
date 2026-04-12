@@ -836,6 +836,12 @@ class SyncCoordinator:
         except Exception:
             log.warning("Could not remove stale torrent file %s", torrent_path)
 
+        # Update DB before removing/re-adding the torrent so that if the LAN
+        # announce loop fires during the executor call it broadcasts the new
+        # info_hash rather than the stale old one (which would cause the seeder
+        # to see a mismatch and switch back, undoing the change).
+        self._db.set_share_state(share_id, ShareState.SYNCING,
+                                 info_hash=remote_info_hash)
         self._lt.remove_share(share_id, delete_files=False)
         try:
             loop = asyncio.get_running_loop()
