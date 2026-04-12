@@ -370,6 +370,16 @@ export default class PeerDupExtension extends Extension {
         );
         pauseItem.connect('activate', () => this._togglePause(share.share_id, isPaused));
         this._indicator.menu.addMenuItem(pauseItem);
+
+        // ── Row 4: copy share ID ─────────────────────────────────────────
+
+        const copyItem = new PopupMenu.PopupMenuItem('Copy share ID');
+        copyItem.connect('activate', () => {
+            St.Clipboard.get_default().set_text(
+                St.ClipboardType.CLIPBOARD, share.share_id
+            );
+        });
+        this._indicator.menu.addMenuItem(copyItem);
     }
 
     // ── Share creation / joining ───────────────────────────────────────────
