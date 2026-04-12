@@ -18,6 +18,8 @@ from nacl.signing import SigningKey
 
 from daemon.identity import Identity
 from daemon.lan.discovery import (
+    INFO_HASH_LEN,
+    SEQ_LEN,
     SIG_LEN,
     VERSION,
     LanDiscovery,
@@ -36,6 +38,11 @@ def _make_share_id() -> str:
     return base58.b58encode(bytes(SigningKey.generate().verify_key)).decode()
 
 
+def _make_share(info_hash_hex: str = "", seq: int = 0) -> tuple:
+    """Return a (share_id, info_hash_hex, seq) triple."""
+    return (_make_share_id(), info_hash_hex, seq)
+
+
 def _make_lan_config(**overrides):
     from daemon.config import LanConfig
     cfg = LanConfig()
@@ -48,30 +55,32 @@ def _make_lan_config(**overrides):
 
 class TestPackUnpack:
     def test_single_share_round_trip(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id()]
-        port      = 55001
+        identity = _make_identity()
+        shares   = [_make_share()]
+        port     = 55001
 
-        data  = pack_packet(identity, share_ids, port)
+        data   = pack_packet(identity, shares, port)
         result = unpack_packet(data)
 
         assert result is not None
-        peer_id_out, share_ids_out, port_out = result
-        assert peer_id_out  == identity.peer_id
-        assert share_ids_out == share_ids
-        assert port_out     == port
+        peer_id_out, shares_out, port_out, name_out = result
+        assert peer_id_out == identity.peer_id
+        assert port_out    == port
+        assert len(shares_out) == 1
+        assert shares_out[0][0] == shares[0][0]  # share_id matches
 
     def test_multiple_shares_round_trip(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id() for _ in range(5)]
-        port      = 49152
+        identity = _make_identity()
+        shares   = [_make_share() for _ in range(5)]
+        port     = 49152
 
-        data   = pack_packet(identity, share_ids, port)
+        data   = pack_packet(identity, shares, port)
         result = unpack_packet(data)
 
         assert result is not None
-        _, share_ids_out, _ = result
-        assert share_ids_out == share_ids
+        _, shares_out, _, _ = result
+        assert len(shares_out) == 5
+        assert [s[0] for s in shares_out] == [s[0] for s in shares]
 
     def test_zero_shares_round_trip(self):
         identity = _make_identity()
@@ -80,10 +89,45 @@ class TestPackUnpack:
         result = unpack_packet(data)
 
         assert result is not None
-        peer_id_out, share_ids_out, port_out = result
-        assert peer_id_out  == identity.peer_id
-        assert share_ids_out == []
-        assert port_out     == 55000
+        peer_id_out, shares_out, port_out, name_out = result
+        assert peer_id_out == identity.peer_id
+        assert shares_out  == []
+        assert port_out    == 55000
+
+    def test_info_hash_and_seq_round_trip(self):
+        identity = _make_identity()
+        ih_hex   = "a" * 40   # 20 bytes as hex
+        shares   = [(_make_share_id(), ih_hex, 42)]
+
+        data   = pack_packet(identity, shares, 55000)
+        result = unpack_packet(data)
+
+        assert result is not None
+        _, shares_out, _, _ = result
+        assert shares_out[0][1] == ih_hex
+        assert shares_out[0][2] == 42
+
+    def test_empty_info_hash_round_trip(self):
+        """Empty info_hash_hex is encoded as 20 zero bytes and decoded back as ''."""
+        identity = _make_identity()
+        shares   = [(_make_share_id(), "", 0)]
+
+        data   = pack_packet(identity, shares, 55000)
+        result = unpack_packet(data)
+
+        assert result is not None
+        _, shares_out, _, _ = result
+        assert shares_out[0][1] == ""
+
+    def test_name_round_trip(self):
+        identity = _make_identity()
+
+        data   = pack_packet(identity, [], 55000, peer_name="mymachine")
+        result = unpack_packet(data)
+
+        assert result is not None
+        _, _, _, name_out = result
+        assert name_out == "mymachine"
 
     def test_port_boundary_values(self):
         identity = _make_identity()
@@ -95,19 +139,22 @@ class TestPackUnpack:
             assert result[2] == port
 
     def test_packet_length_minimum(self):
-        """Zero-share packet is exactly 101 bytes."""
+        """Zero-share v4 packet: 1+32+2+2 (header) + 2+0 (name) + 64 (sig) = 103 bytes."""
         identity = _make_identity()
         data     = pack_packet(identity, [], 55000)
-        # 1 (version) + 32 (peer_id) + 2 (port) + 2 (n) + 0 + 64 (sig)
-        assert len(data) == 101
+        expected = 1 + 32 + 2 + 2 + 2 + 0 + SIG_LEN   # 103
+        assert len(data) == expected
 
     def test_packet_length_with_shares(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id() for _ in range(3)]
-        data      = pack_packet(identity, share_ids, 55000)
-        assert len(data) == 101 + 3 * 32
+        """Each share adds 32 (share_id) + 20 (info_hash) + 4 (seq) = 56 bytes."""
+        identity = _make_identity()
+        shares   = [_make_share() for _ in range(3)]
+        data     = pack_packet(identity, shares, 55000)
+        per_share = 32 + INFO_HASH_LEN + SEQ_LEN   # 56
+        expected  = 103 + 3 * per_share
+        assert len(data) == expected
 
-    def test_version_byte_is_one(self):
+    def test_version_byte(self):
         identity = _make_identity()
         data     = pack_packet(identity, [], 55000)
         assert data[0] == VERSION
@@ -117,9 +164,9 @@ class TestPackUnpack:
 
 class TestSignatureVerification:
     def test_tampered_body_rejected(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id()]
-        data      = bytearray(pack_packet(identity, share_ids, 55000))
+        identity = _make_identity()
+        shares   = [_make_share()]
+        data     = bytearray(pack_packet(identity, shares, 55000))
 
         # Flip a byte in the peer_id section.
         data[5] ^= 0xFF
@@ -136,9 +183,9 @@ class TestSignatureVerification:
         assert unpack_packet(bytes(data)) is None
 
     def test_tampered_signature_rejected(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id()]
-        data      = bytearray(pack_packet(identity, share_ids, 55000))
+        identity = _make_identity()
+        shares   = [_make_share()]
+        data     = bytearray(pack_packet(identity, shares, 55000))
 
         # Corrupt the last byte of the signature.
         data[-1] ^= 0xFF
@@ -158,12 +205,12 @@ class TestSignatureVerification:
         assert unpack_packet(bytes(data)) is None
 
     def test_different_share_tampered_rejected(self):
-        identity  = _make_identity()
-        share_ids = [_make_share_id()]
-        data      = bytearray(pack_packet(identity, share_ids, 55000))
+        identity = _make_identity()
+        shares   = [_make_share()]
+        data     = bytearray(pack_packet(identity, shares, 55000))
 
-        # Flip a byte in the share_id section.
-        data[37] ^= 0x01   # first byte of first share_id
+        # Flip a byte in the share_id section (offset 37 = after version+peer_id+port+n).
+        data[37] ^= 0x01
 
         assert unpack_packet(bytes(data)) is None
 
@@ -200,9 +247,9 @@ class TestPacketValidation:
     def test_share_count_overflow_rejected(self):
         """Packet claiming n_shares but not having the bytes for them."""
         identity = _make_identity()
-        # Build a valid zero-share packet then manually set n_shares = 5
+        # Build a valid zero-share packet then manually set n_shares = 5.
         data = bytearray(pack_packet(identity, [], 55000))
-        # n_shares is at offset 35 (2 bytes big-endian after version+peer_id+port)
+        # n_shares is at offset 35: version(1) + peer_id(32) + port(2) = 35
         struct.pack_into("!H", data, 35, 5)
         assert unpack_packet(bytes(data)) is None
 
@@ -212,23 +259,23 @@ class TestPacketValidation:
 class TestSelfRejection:
     def test_own_packet_not_forwarded(self):
         """LanDiscovery must not call on_peer_seen when peer_id matches self."""
-        identity  = _make_identity()
-        share_ids = [_make_share_id()]
-        seen      = []
+        identity = _make_identity()
+        shares   = [_make_share()]
+        seen     = []
 
-        async def on_peer_seen(peer_id, sids, host, port):
+        async def on_peer_seen(peer_id, sids, host, port, name):
             seen.append(peer_id)
 
         cfg = _make_lan_config(enabled=True)
         ld  = LanDiscovery(
             identity      = identity,
             config        = cfg,
-            get_share_ids = lambda: share_ids,
+            get_share_ids = lambda: shares,
             on_peer_seen  = on_peer_seen,
             listen_port   = 55000,
         )
 
-        packet = pack_packet(identity, share_ids, 55000)
+        packet = pack_packet(identity, shares, 55000)
         ld._on_datagram(packet, "127.0.0.1")
 
         # Run event loop briefly to let any created tasks run.
@@ -242,22 +289,22 @@ class TestSelfRejection:
         """LanDiscovery DOES call on_peer_seen for a different peer."""
         id_local  = _make_identity()
         id_remote = _make_identity()
-        share_ids = [_make_share_id()]
+        shares    = [_make_share()]
         seen      = []
 
-        async def on_peer_seen(peer_id, sids, host, port):
+        async def on_peer_seen(peer_id, sids, host, port, name):
             seen.append((peer_id, host, port))
 
         cfg = _make_lan_config(enabled=True)
         ld  = LanDiscovery(
             identity      = id_local,
             config        = cfg,
-            get_share_ids = lambda: share_ids,
+            get_share_ids = lambda: shares,
             on_peer_seen  = on_peer_seen,
             listen_port   = 55000,
         )
 
-        packet = pack_packet(id_remote, share_ids, 55001)
+        packet = pack_packet(id_remote, shares, 55001)
 
         async def _run():
             # _on_datagram creates a task; needs a running loop.
@@ -273,10 +320,10 @@ class TestSelfRejection:
 
     def test_invalid_packet_not_forwarded(self):
         """Garbled data must never trigger on_peer_seen."""
-        identity  = _make_identity()
-        seen      = []
+        identity = _make_identity()
+        seen     = []
 
-        async def on_peer_seen(peer_id, sids, host, port):
+        async def on_peer_seen(peer_id, sids, host, port, name):
             seen.append(peer_id)
 
         cfg = _make_lan_config(enabled=True)

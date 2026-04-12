@@ -21,7 +21,7 @@ from daemon.identity import Identity, load_or_create, _canonical_addrs
 
 def test_load_config_defaults():
     cfg = load_config(path=None)
-    assert cfg.daemon.port          == 55000
+    assert cfg.daemon.listen_port   == 55000
     assert cfg.registry.tls        == False
     assert cfg.logging.level       == "INFO"
 

@@ -9,6 +9,10 @@ install:
 
 ## Generate gRPC stubs from proto definition
 ## Output: registry_pb2.py  registry_pb2_grpc.py
+## The grpc stub uses a bare "import registry_pb2" which only works when
+## registry/ is on sys.path.  We fix it to an absolute package import so it
+## works when imported as "from registry import registry_pb2_grpc" from any
+## Python context (e.g. daemon integration tests).
 proto:
 	python -m grpc_tools.protoc \
 		-I proto \
@@ -16,7 +20,8 @@ proto:
 		--python_out=$(PROTO_OUT) \
 		--grpc_python_out=$(PROTO_OUT) \
 		$(PROTO_SRC)
-	@echo "Stubs written to $(PROTO_OUT)/registry_pb2*.py"
+	@sed -i 's/^import registry_pb2 as registry__pb2$$/from registry import registry_pb2 as registry__pb2/' $(PROTO_OUT)/registry_pb2_grpc.py
+	@echo "Stubs written to $(PROTO_OUT)/registry_pb2*.py (import path fixed)"
 
 ## Run tests (requires: make install)
 test:

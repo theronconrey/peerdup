@@ -44,7 +44,7 @@ from daemon.torrent.session import TorrentStatus
 @pytest.fixture(scope="module")
 def registry_port():
     """In-process registry server. Module-scoped — shared across all tests."""
-    import registry_pb2_grpc as pb_grpc
+    from registry import registry_pb2_grpc as pb_grpc
 
     engine = create_engine(
         "sqlite:///:memory:",

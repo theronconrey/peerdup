@@ -7,8 +7,7 @@ build/
 venv/
 
 # Generated proto stubs (auto-generated during pip install via setup.py)
-daemon/registry_pb2.py
-daemon/registry_pb2_grpc.py
+# Note: daemon/registry_pb2*.py are static shim files (not generated) and ARE committed.
 daemon/control_pb2.py
 daemon/control_pb2_grpc.py
 

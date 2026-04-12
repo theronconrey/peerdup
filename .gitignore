@@ -8,10 +8,9 @@ build/
 venv/
 
 # Generated proto stubs (auto-generated during pip install via setup.py)
+# registry/daemon registry_pb2*.py are static shim files and ARE committed.
 registry/registry/registry_pb2.py
 registry/registry/registry_pb2_grpc.py
-daemon/daemon/registry_pb2.py
-daemon/daemon/registry_pb2_grpc.py
 daemon/daemon/control_pb2.py
 daemon/daemon/control_pb2_grpc.py
 
