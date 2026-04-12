@@ -34,10 +34,31 @@ echo "Enabling extension ..."
 if gnome-extensions enable "$UUID" 2>/dev/null; then
     echo "Extension enabled."
 else
+    # gnome-extensions enable requires a live session reload.
+    # Pre-enable via gsettings so it activates automatically on next login.
+    python3 - "$UUID" <<'PYEOF'
+import subprocess, ast, sys
+uuid = sys.argv[1]
+raw = subprocess.run(
+    ["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+    capture_output=True, text=True
+).stdout.strip()
+try:
+    exts = ast.literal_eval(raw.lstrip("@as ").strip())
+    if not isinstance(exts, list):
+        exts = []
+except Exception:
+    exts = []
+if uuid in exts:
+    print("Extension already in enabled list.")
+    sys.exit(0)
+exts.append(uuid)
+new_val = "[" + ", ".join(f"'{e}'" for e in exts) + "]"
+subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", new_val], check=True)
+print("Extension pre-enabled via gsettings.")
+PYEOF
     echo ""
-    echo "Could not enable automatically (may need a session restart)."
-    echo "After logging back in, run:"
-    echo "  gnome-extensions enable $UUID"
+    echo "Log out and back in - the peerdup icon will appear in your top bar automatically."
 fi
 
 echo ""
