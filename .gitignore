@@ -36,3 +36,4 @@ config.toml
 .env
 .DS_Store
 CLAUDE.md
+SECURITY_AUDIT.md
