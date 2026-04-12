@@ -1047,6 +1047,17 @@ class SyncCoordinator:
             self._data_dir, "torrents", f"{evt.share_id}.torrent"
         )
         try:
+            # Delete the cached .torrent file so add_share always rebuilds from
+            # the current directory state. If we let it load the stale file,
+            # libtorrent will expect files at their OLD paths and create empty
+            # placeholders for any that are now missing (moved or deleted),
+            # making them reappear.
+            try:
+                if os.path.exists(torrent_path):
+                    os.remove(torrent_path)
+            except Exception:
+                log.debug("Could not remove stale torrent file %s", torrent_path)
+
             # Remove old handle and re-add with fresh metadata.
             self._lt.remove_share(evt.share_id, delete_files=False)
             loop = asyncio.get_running_loop()
