@@ -6,7 +6,7 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CONFIG_FILE="$SCRIPT_DIR/config.toml"
 
-# ── --uninstall flag ──────────────────────────────────────────────────────────
+# ── flags ─────────────────────────────────────────────────────────────────────
 
 if [ "${1:-}" = "--uninstall" ]; then
     UNINSTALL_SCRIPT="$SCRIPT_DIR/../uninstall.sh"
@@ -15,6 +15,11 @@ if [ "${1:-}" = "--uninstall" ]; then
         exit 1
     fi
     exec sh "$UNINSTALL_SCRIPT"
+fi
+
+UPDATE_MODE=0
+if [ "${1:-}" = "--update" ]; then
+    UPDATE_MODE=1
 fi
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -43,11 +48,23 @@ prompt() {
 }
 
 prompt_optional() {
-    # prompt_optional <var_name> <prompt_text>
-    var="$1"; msg="$2"
-    printf '%s (leave blank to skip): ' "$msg"
-    read -r value
-    eval "$var=\$value"
+    # prompt_optional <var_name> <prompt_text> [current_value]
+    # With a current value: Enter keeps it, '-' clears it.
+    # Without a current value: Enter leaves blank.
+    var="$1"; msg="$2"; current="${3:-}"
+    if [ -n "$current" ]; then
+        printf '%s [%s] (Enter to keep, - to clear): ' "$msg" "$current"
+        read -r value
+        case "$value" in
+            '')  eval "$var=\$current" ;;
+            '-') eval "$var=" ;;
+            *)   eval "$var=\$value" ;;
+        esac
+    else
+        printf '%s (leave blank to skip): ' "$msg"
+        read -r value
+        eval "$var=\$value"
+    fi
 }
 
 prompt_yn() {
@@ -70,6 +87,33 @@ prompt_yn() {
     done
 }
 
+_cfg_get() {
+    # _cfg_get <section> <key> <default>
+    # Reads a value from $CONFIG_FILE using Python tomllib.
+    python3 - "$CONFIG_FILE" "$1" "$2" "$3" << 'PYEOF'
+import sys
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.stdout.write(sys.argv[4] + '\n'); sys.exit(0)
+_, cfg_file, section, key, default = sys.argv
+try:
+    with open(cfg_file, 'rb') as f:
+        cfg = tomllib.load(f)
+    val = cfg.get(section, {}).get(key)
+    if val is None:
+        val = default
+    elif isinstance(val, bool):
+        val = 'true' if val else 'false'
+    sys.stdout.write(str(val) + '\n')
+except Exception:
+    sys.stdout.write(default + '\n')
+PYEOF
+}
+
 # ── systemd detection ─────────────────────────────────────────────────────────
 
 HAVE_SYSTEMD=0
@@ -77,8 +121,10 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
     HAVE_SYSTEMD=1
 fi
 
-# If already managed by systemd, just restart and exit.
-if [ "$HAVE_SYSTEMD" = "1" ] && systemctl --user is-enabled peerdup-daemon >/dev/null 2>&1; then
+# If already managed by systemd and not in update mode, just restart and exit.
+if [ "$UPDATE_MODE" = "0" ] && \
+   [ "$HAVE_SYSTEMD" = "1" ] && \
+   systemctl --user is-enabled peerdup-daemon >/dev/null 2>&1; then
     info "peerdup-daemon is managed by systemd - restarting..."
     systemctl --user restart peerdup-daemon
     ok "Restarted."
@@ -88,16 +134,44 @@ if [ "$HAVE_SYSTEMD" = "1" ] && systemctl --user is-enabled peerdup-daemon >/dev
     exit 0
 fi
 
-# ── first-run config ──────────────────────────────────────────────────────────
+# ── config wizard ─────────────────────────────────────────────────────────────
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    printf '\npeerdup daemon setup\n'
-    printf '====================\n\n'
-    printf 'No config.toml found. Answer a few questions to get started.\n\n'
+if [ ! -f "$CONFIG_FILE" ] || [ "$UPDATE_MODE" = "1" ]; then
 
-    prompt PEER_NAME "Name for this machine (e.g. nas, laptop)"
-    prompt_optional REGISTRY_ADDRESS "Registry address (host:port)"
+    if [ "$UPDATE_MODE" = "1" ] && [ -f "$CONFIG_FILE" ]; then
+        printf '\npeerdup daemon update\n'
+        printf '=====================\n\n'
+        printf 'Current settings loaded. Press Enter to keep each value.\n\n'
+
+        _DEF_NAME=$(_cfg_get       "identity"  "name"     "")
+        _DEF_REGISTRY=$(_cfg_get   "registry"  "address"  "")
+        _DEF_CA=$(_cfg_get         "registry"  "ca_file"  "")
+        _DEF_CERT=$(_cfg_get       "registry"  "cert_file" "")
+        _DEF_KEY=$(_cfg_get        "registry"  "key_file"  "")
+        _DEF_LAN=$(_cfg_get        "lan"       "enabled"  "true")
+        _DEF_LAN_IFACE=$(_cfg_get  "lan"       "interface" "")
+        _DEF_RELAY_ADDR=$(_cfg_get "relay"     "address"   "")
+        _DEF_LOG=$(_cfg_get        "logging"   "level"    "INFO")
+    else
+        printf '\npeerdup daemon setup\n'
+        printf '====================\n\n'
+        printf 'No config.toml found. Answer a few questions to get started.\n\n'
+
+        _DEF_NAME=""
+        _DEF_REGISTRY=""
+        _DEF_CA=""
+        _DEF_CERT=""
+        _DEF_KEY=""
+        _DEF_LAN="true"
+        _DEF_LAN_IFACE=""
+        _DEF_RELAY_ADDR=""
+        _DEF_LOG="INFO"
+    fi
+
     LISTEN_PORT="55000"
+
+    prompt PEER_NAME "Name for this machine (e.g. nas, laptop)" "$_DEF_NAME"
+    prompt_optional REGISTRY_ADDRESS "Registry address (host:port)" "$_DEF_REGISTRY"
 
     if [ -n "$REGISTRY_ADDRESS" ]; then
         TLS_ENABLED="true"
@@ -105,10 +179,10 @@ if [ ! -f "$CONFIG_FILE" ]; then
         printf '\n'
         printf 'Optional: mTLS certificate paths\n'
         printf '(Leave blank to skip - only needed if your registry requires client certificates)\n\n'
-        prompt_optional CA_FILE "CA certificate file for verifying registry (e.g. /etc/peerdup/ca.crt)"
-        prompt_optional CERT_FILE "Client certificate file for mTLS (e.g. /etc/peerdup/client.crt)"
+        prompt_optional CA_FILE   "CA certificate file for verifying registry" "$_DEF_CA"
+        prompt_optional CERT_FILE "Client certificate file for mTLS"           "$_DEF_CERT"
         if [ -n "$CERT_FILE" ]; then
-            prompt_optional KEY_FILE "Client private key file for mTLS (e.g. /etc/peerdup/client.key)"
+            prompt_optional KEY_FILE "Client private key file for mTLS" "$_DEF_KEY"
         else
             KEY_FILE=""
         fi
@@ -120,7 +194,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
     fi
 
     printf '\n'
-    prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "y"
+    _yn_lan_default="$_DEF_LAN"
+    [ -z "$_yn_lan_default" ] && _yn_lan_default="y"
+    prompt_yn LAN_ENABLED "Enable LAN multicast discovery" "$_yn_lan_default"
 
     LAN_INTERFACE=""
     if [ "$LAN_ENABLED" = "true" ]; then
@@ -136,11 +212,11 @@ except Exception:
 " 2>/dev/null)
 
         printf '\n'
-        if [ -n "$DETECTED_IFACE" ]; then
-            printf 'Detected LAN interface: \033[1m%s\033[0m\n' "$DETECTED_IFACE"
-            printf 'Press Enter to use this, or type a different IP (e.g. 192.168.1.50): '
+        _iface_default="${_DEF_LAN_IFACE:-$DETECTED_IFACE}"
+        if [ -n "$_iface_default" ]; then
+            printf 'LAN interface [%s]: ' "$_iface_default"
             read -r iface_input
-            LAN_INTERFACE="${iface_input:-$DETECTED_IFACE}"
+            LAN_INTERFACE="${iface_input:-$_iface_default}"
         else
             printf 'Could not auto-detect LAN interface.\n'
             printf 'Enter the IP address of the interface to use for multicast discovery\n'
@@ -150,7 +226,7 @@ except Exception:
     fi
 
     printf '\n'
-    prompt_optional RELAY_ADDRESS "Relay server address (host:port) for peers behind symmetric NAT"
+    prompt_optional RELAY_ADDRESS "Relay server address (host:port) for peers behind symmetric NAT" "$_DEF_RELAY_ADDR"
     if [ -n "$RELAY_ADDRESS" ]; then
         RELAY_ENABLED="true"
         RELAY_TIMEOUT="120"
@@ -159,7 +235,7 @@ except Exception:
     fi
 
     printf '\n'
-    prompt LOG_LEVEL "Log level (DEBUG/INFO/WARNING/ERROR)" "INFO"
+    prompt LOG_LEVEL "Log level (DEBUG/INFO/WARNING/ERROR)" "$_DEF_LOG"
 
     if [ "$RELAY_ENABLED" = "true" ]; then
         RELAY_SECTION="
@@ -227,7 +303,35 @@ EOF
     printf '\nConfiguration saved to config.toml\n'
 
     if [ -z "$REGISTRY_ADDRESS" ]; then
-        printf '\n\033[1;33m note\033[0m Running in LAN-only mode. To add a registry later, edit config.toml and rerun peerdup-setup.\n'
+        printf '\n\033[1;33m note\033[0m Running in LAN-only mode. To add a registry later, run peerdup-setup --update.\n'
+    fi
+
+    # In update mode, restart via systemd if available and exit.
+    if [ "$UPDATE_MODE" = "1" ]; then
+        printf '\n'
+        if [ "$HAVE_SYSTEMD" = "1" ] && systemctl --user is-enabled peerdup-daemon >/dev/null 2>&1; then
+            info "Restarting peerdup-daemon..."
+            systemctl --user restart peerdup-daemon
+            ok "Restarted."
+            printf '\n'
+            printf 'Status: systemctl --user status peerdup-daemon\n'
+            printf 'Logs:   journalctl --user -u peerdup-daemon -f\n'
+        else
+            pkill -f "peerdup-daemon --config" 2>/dev/null && sleep 1 || true
+            DAEMON_BIN="$(command -v peerdup-daemon 2>/dev/null || echo "")"
+            [ -n "$DAEMON_BIN" ] || { printf '\033[1;31merror:\033[0m peerdup-daemon not found\n'; exit 1; }
+            LOG_FILE="${TMPDIR:-/tmp}/peerdup-daemon.log"
+            "$DAEMON_BIN" --config "$CONFIG_FILE" >"$LOG_FILE" 2>&1 &
+            sleep 2
+            if kill -0 $! 2>/dev/null; then
+                ok "Daemon restarted (pid $!)."
+            else
+                printf '\033[1;31mDaemon failed to start. Logs:\033[0m\n\n'
+                cat "$LOG_FILE"
+                exit 1
+            fi
+        fi
+        exit 0
     fi
 
     printf '\n'
