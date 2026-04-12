@@ -6,6 +6,17 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CONFIG_FILE="$SCRIPT_DIR/config.toml"
 
+# ── --uninstall flag ──────────────────────────────────────────────────────────
+
+if [ "${1:-}" = "--uninstall" ]; then
+    UNINSTALL_SCRIPT="$SCRIPT_DIR/../uninstall.sh"
+    if [ ! -f "$UNINSTALL_SCRIPT" ]; then
+        printf '\033[1;31merror:\033[0m uninstall.sh not found at %s\n' "$UNINSTALL_SCRIPT" >&2
+        exit 1
+    fi
+    exec sh "$UNINSTALL_SCRIPT"
+fi
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
