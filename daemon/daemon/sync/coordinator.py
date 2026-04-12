@@ -1,25 +1,27 @@
 """
-SyncCoordinator — the brain of the daemon.
+SyncCoordinator - the brain of the daemon.
 
 Wires together:
-  - FileWatcher   → detects local changes
-  - RegistryClient → announces presence, watches peer state
-  - LibtorrentSession → manages actual transfers
-  - StateDB        → persists share/file/peer state across restarts
+  - FileWatcher   -> detects local changes
+  - RegistryClient -> announces presence, watches peer state
+  - LibtorrentSession -> manages actual transfers
+  - StateDB        -> persists share/file/peer state across restarts
 
 One coordinator instance per daemon. All async.
+
+Sub-components handle their own concerns:
+  - AnnounceManager  (announce.py)    : per-share registry heartbeat
+  - TorrentManager   (torrent_mgr.py) : libtorrent handle lifecycle + rebuild
+  - PeerEventHandler (peer_handler.py): registry stream + LAN peer events
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import functools
 import json
 import logging
 import os
-import socket
-import time
 from pathlib import Path
 from typing import Callable
 
@@ -31,16 +33,11 @@ from daemon.registry.client import RegistryClient, watch_share_peers_loop
 from daemon.state.db import ConflictStrategy, ShareState, StateDB
 from daemon.torrent.session import LibtorrentSession, TorrentStatus
 from daemon.watcher.fs import FileChangedEvent, FileWatcher
+from daemon.sync.announce import AnnounceManager
+from daemon.sync.torrent_mgr import TorrentManager
+from daemon.sync.peer_handler import PeerEventHandler
 
 log = logging.getLogger(__name__)
-
-# How often to re-announce even without a file change.
-ANNOUNCE_INTERVAL_SECONDS = 120
-# Minimum gap between torrent rebuilds for the same share. Coalesces bursts of
-# FS events (e.g. a folder rename with N files) into at most 2 rebuilds.
-_REBUILD_DEBOUNCE_SECS = 2.0
-# TTL sent to registry; re-announce before this expires.
-ANNOUNCE_TTL_SECONDS      = 300
 
 
 class SyncCoordinator:
@@ -72,8 +69,6 @@ class SyncCoordinator:
         self._watch_stop:  dict[str, asyncio.Event] = {}
         # share_id -> asyncio.Task
         self._watch_tasks: dict[str, asyncio.Task]  = {}
-        # share_id -> asyncio.Task (announce heartbeat)
-        self._announce_tasks: dict[str, asyncio.Task] = {}
 
         # Control event bus for the ControlService to subscribe to.
         self._control_subscribers: list[asyncio.Queue] = []
@@ -82,12 +77,6 @@ class SyncCoordinator:
         # calls from racing on DB state and libtorrent handles).
         self._switching: set[str] = set()
 
-        # Per-share rebuild debounce: timestamp of last rebuild and any pending
-        # follow-up task. Prevents a burst of FS events (e.g. folder rename with
-        # N files) from triggering N full torrent rebuilds.
-        self._last_rebuild:   dict[str, float]                  = {}
-        self._pending_rebuild: dict[str, asyncio.Task[None]]    = {}
-
         self._file_watcher: FileWatcher | None = None
         self._lan = None   # LanDiscovery, set in start() if enabled
 
@@ -95,33 +84,60 @@ class SyncCoordinator:
         # correct event loop via asyncio.run_coroutine_threadsafe.
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    # ── Startup ───────────────────────────────────────────────────────────────
+        # Sub-components (constructed last because callbacks reference self).
+        self._announce_mgr = AnnounceManager(
+            identity    = self._identity,
+            registry    = self._registry,
+            db          = self._db,
+            listen_port = self._listen_port,
+            stop_event  = self._stop_event,
+        )
+        self._torrent_mgr = TorrentManager(
+            lt                  = self._lt,
+            db                  = self._db,
+            data_dir            = self._data_dir,
+            on_rebuild_complete = self._on_rebuild_complete,
+        )
+        self._peer_handler = PeerEventHandler(
+            identity            = self._identity,
+            db                  = self._db,
+            lt                  = self._lt,
+            relay_config        = self._relay_config,
+            on_switch_to_remote = self._switch_to_remote_torrent,
+            on_publish_event    = self._publish_control_event,
+            on_pause_watcher    = lambda sid: (
+                self._file_watcher.remove_share(sid) if self._file_watcher else None
+            ),
+        )
+
+    # -- Startup ---------------------------------------------------------------
 
     async def start(self, loop: asyncio.AbstractEventLoop, lan_config=None):
         """Boot the coordinator. Call once after registry.connect()."""
         self._loop = loop
 
-        # Bridge watchdog thread → asyncio queue.
+        # Bridge watchdog thread -> asyncio queue.
         bridge = FileWatcher.make_async_bridge(loop, self._fs_event_queue)
         self._file_watcher = FileWatcher(on_change=bridge)
         self._file_watcher.start()
 
-        # Bridge libtorrent status alerts → asyncio queue.
+        # Bridge libtorrent status alerts -> asyncio queue.
         def _lt_bridge(status: TorrentStatus):
             loop.call_soon_threadsafe(self._status_queue.put_nowait, status)
 
-        self._lt._on_status = _lt_bridge
-
-        # Bridge libtorrent metadata_received alerts → pre-positioning coroutine.
-        def _metadata_bridge(share_id: str):
+        # Bridge libtorrent metadata_received alerts -> pre-positioning coroutine.
+        def _metadata_bridge(sid: str):
             loop.call_soon_threadsafe(
                 lambda: loop.create_task(
-                    self._on_metadata_received(share_id),
-                    name=f"preposition-{share_id[:8]}",
+                    self._torrent_mgr.on_metadata_received(sid),
+                    name=f"preposition-{sid[:8]}",
                 )
             )
 
-        self._lt._on_metadata = _metadata_bridge
+        self._lt.register_alert_handlers(
+            on_status   = _lt_bridge,
+            on_metadata = _metadata_bridge,
+        )
         self._lt.start()
 
         # Start background tasks immediately so the control socket is usable.
@@ -139,7 +155,7 @@ class SyncCoordinator:
                 identity      = self._identity,
                 config        = lan_config,
                 get_share_ids = self._get_active_share_ids,
-                on_peer_seen  = self._on_lan_peer,
+                on_peer_seen  = self._peer_handler.handle_lan_peer,
                 listen_port   = self._listen_port,
                 peer_name     = self._peer_name,
             )
@@ -156,13 +172,10 @@ class SyncCoordinator:
         self._stop_event.set()
         for stop_ev in self._watch_stop.values():
             stop_ev.set()
-        all_tasks = (
-            list(self._watch_tasks.values())
-            + list(self._announce_tasks.values())
-            + [t for t in self._pending_rebuild.values() if not t.done()]
-        )
-        for task in all_tasks:
+        for task in list(self._watch_tasks.values()):
             task.cancel()
+        self._torrent_mgr.stop_all()
+        await self._announce_mgr.stop_all()
         if self._file_watcher:
             self._file_watcher.stop()
         if self._lan:
@@ -170,7 +183,7 @@ class SyncCoordinator:
         self._lt.stop()
         log.info("SyncCoordinator stopped")
 
-    # ── Runtime share management (called by ControlService) ──────────────────
+    # -- Runtime share management (called by ControlService) ------------------
 
     async def create_share(self, name: str, local_path: str,
                            permission: str = "rw",
@@ -179,7 +192,7 @@ class SyncCoordinator:
                            local_only: bool = False) -> dict:
         """
         Create a brand-new share (or re-import an existing one):
-          1. Generate a fresh Ed25519 keypair — or load seed from import_key_hex
+          1. Generate a fresh Ed25519 keypair - or load seed from import_key_hex
           2. Call registry.CreateShare (unless local_only=True)
           3. Persist share keypair locally
           4. Activate the share (watch, torrent, announce)
@@ -231,7 +244,7 @@ class SyncCoordinator:
         """
         share = self._db.get_share(share_id)
         if not share:
-            raise KeyError(f"Share {share_id} not found locally — "
+            raise KeyError(f"Share {share_id} not found locally - "
                            "you must be a member to grant access")
         if not share.is_owner:
             raise PermissionError(
@@ -326,21 +339,15 @@ class SyncCoordinator:
         if task:
             task.cancel()
 
-        atask = self._announce_tasks.pop(share_id, None)
-        if atask:
-            atask.cancel()
-
-        ptask = self._pending_rebuild.pop(share_id, None)
-        if ptask and not ptask.done():
-            ptask.cancel()
-        self._last_rebuild.pop(share_id, None)
+        self._announce_mgr.stop_share(share_id)
+        self._torrent_mgr.clear_state(share_id)
 
         # Stop watching filesystem.
         if self._file_watcher:
             self._file_watcher.remove_share(share_id)
 
         # Remove libtorrent torrent.
-        self._lt.remove_share(share_id, delete_files=delete_files)
+        self._torrent_mgr.deactivate(share_id, delete_files=delete_files)
 
         # Remove from state db.
         self._db.remove_share(share_id)
@@ -365,9 +372,9 @@ class SyncCoordinator:
     def list_share_peers(self, share_id: str) -> dict:
         """
         Return full peer roster for a share, merging three sources:
-          1. Registry  — authoritative ACL (who has access, permission, name)
-          2. known_peers table — online status + last-seen addresses
-          3. libtorrent — active transfer rates for connected peers
+          1. Registry  - authoritative ACL (who has access, permission, name)
+          2. known_peers table - online status + last-seen addresses
+          3. libtorrent - active transfer rates for connected peers
         """
         # Source 1: registry ACL (registry shares only).
         local_share_row = self._db.get_share(share_id)
@@ -396,7 +403,7 @@ class SyncCoordinator:
         lt_status = self._lt.get_status(share_id)
         lt_peers: dict[str, dict] = {}
         if lt_status:
-            # libtorrent doesn't give per-peer rates via get_status —
+            # libtorrent doesn't give per-peer rates via get_status -
             # those come from handle.get_peer_info(). We include
             # aggregate rates here; per-peer rates are a future enhancement.
             pass
@@ -481,7 +488,7 @@ class SyncCoordinator:
 
     def get_share_info(self, share_id: str) -> dict:
         """
-        Return metadata for a single share — no peer roster.
+        Return metadata for a single share - no peer roster.
         Merges local DB state + libtorrent status + registry metadata.
         """
         local_share = self._db.get_share(share_id)
@@ -570,8 +577,8 @@ class SyncCoordinator:
     async def resolve_conflict(self, conflict_id: int, resolution: str) -> dict:
         """
         Resolve a pending conflict.
-        resolution: "keep-local"  — discard remote version, resume seeding ours
-                    "keep-remote" — switch to remote torrent, accept their version
+        resolution: "keep-local"  - discard remote version, resume seeding ours
+                    "keep-remote" - switch to remote torrent, accept their version
         """
         if resolution not in ("keep-local", "keep-remote"):
             raise ValueError(
@@ -640,269 +647,7 @@ class SyncCoordinator:
             ))
         return result
 
-    # ── Relay ─────────────────────────────────────────────────────────────────
-
-    async def _try_relay_bridge(self, share_id: str, peer_id: str):
-        """
-        Attempt to open a relay bridge to peer_id for share_id.
-        On success, adds 127.0.0.1:<local_port> to libtorrent as an extra
-        peer endpoint. libtorrent races direct vs relay and uses whichever
-        connects first.
-        """
-        from daemon.relay.client import open_relay_bridge
-        try:
-            local_port = await open_relay_bridge(
-                relay_address = self._relay_config.address,
-                share_id      = share_id,
-                identity      = self._identity,
-                want_peer_id  = peer_id,
-                pair_timeout  = float(self._relay_config.pair_timeout),
-            )
-            self._lt.add_peer(share_id, "127.0.0.1", local_port)
-            log.info("Relay bridge up share=%s peer=%s local_port=%d",
-                     share_id[:8], peer_id[:8], local_port)
-        except asyncio.TimeoutError:
-            log.debug("Relay bridge timed out waiting for partner share=%s peer=%s",
-                      share_id[:8], peer_id[:8])
-        except Exception as exc:
-            log.debug("Relay bridge failed share=%s peer=%s: %s",
-                      share_id[:8], peer_id[:8], exc)
-
-    # ── Announce loop ─────────────────────────────────────────────────────────
-
-    async def _announce_loop(self, share_id: str):
-        """Heartbeat: re-announce every ANNOUNCE_INTERVAL_SECONDS."""
-        while not self._stop_event.is_set():
-            try:
-                await self._announce(share_id)
-            except Exception:
-                log.exception("Announce failed share=%s", share_id)
-            await asyncio.sleep(ANNOUNCE_INTERVAL_SECONDS)
-
-    async def _announce(self, share_id: str):
-        addrs = self._local_addrs()
-        sig   = self._identity.sign_announce(share_id, addrs, ANNOUNCE_TTL_SECONDS)
-        # Include our current info_hash so joining peers can do magnet-style adds.
-        local_share = self._db.get_share(share_id)
-        ih = local_share.info_hash if local_share else ""
-        ext_host, ext_port, ttl = self._registry.announce(
-            share_id       = share_id,
-            peer_id        = self._identity.peer_id,
-            internal_addrs = addrs,
-            ttl_seconds    = ANNOUNCE_TTL_SECONDS,
-            signature      = sig,
-            info_hash      = ih or "",
-        )
-        log.debug("Announced share=%s ext=%s:%s ttl=%ds info_hash=%s",
-                  share_id, ext_host, ext_port, ttl, ih)
-
-    def _local_addrs(self) -> list[dict]:
-        """Return this host's LAN addresses on the listen port."""
-        addrs = []
-        try:
-            hostname = socket.gethostname()
-            for info in socket.getaddrinfo(hostname, self._listen_port,
-                                           socket.AF_INET):
-                ip = info[4][0]
-                if not ip.startswith("127."):
-                    addrs.append({"host": ip, "port": self._listen_port,
-                                  "is_lan": True})
-        except Exception:
-            pass
-        # Fallback
-        if not addrs:
-            addrs.append({"host": "0.0.0.0", "port": self._listen_port,
-                          "is_lan": True})
-        return addrs
-
-    def _make_peer_event_handler(self, share_id: str):
-        """Return a per-share event handler closure."""
-        from daemon import registry_pb2 as pb  # type: ignore
-
-        async def _handler(event):
-            peer_id = event.peer.peer_id
-
-            if peer_id == self._identity.peer_id:
-                return
-
-            addrs = [
-                {"host": a.host, "port": a.port, "is_lan": a.is_lan}
-                for a in event.peer.addresses
-            ]
-
-            if event.type in (pb.PeerEvent.EVENT_TYPE_ONLINE,
-                               pb.PeerEvent.EVENT_TYPE_UPDATED):
-                log.info("Peer online share=%s peer=%s addrs=%s",
-                         share_id, peer_id[:8], addrs)
-                self._db.upsert_peer(share_id, peer_id, addrs, online=True)
-
-                # Detect info_hash mismatch: remote peer has different content.
-                remote_ih = event.peer.info_hash
-                local_share = self._db.get_share(share_id)
-                local_ih = local_share.info_hash if local_share else ""
-                if (remote_ih and local_ih and remote_ih != local_ih):
-                    await self._handle_remote_update(
-                        share_id, remote_ih, peer_id, local_share,
-                    )
-                else:
-                    # Same torrent or we have no content yet - inject peer.
-                    for addr in addrs:
-                        self._lt.add_peer(share_id, addr["host"], addr["port"])
-
-                # Attempt relay bridge alongside direct connection (fire and forget).
-                if (self._relay_config and self._relay_config.enabled
-                        and self._relay_config.address):
-                    asyncio.create_task(
-                        self._try_relay_bridge(share_id, peer_id),
-                        name=f"relay-{share_id[:8]}-{peer_id[:8]}",
-                    )
-
-            elif event.type in (pb.PeerEvent.EVENT_TYPE_OFFLINE,
-                                 pb.PeerEvent.EVENT_TYPE_REMOVED):
-                log.info("Peer offline share=%s peer=%s", share_id, peer_id[:8])
-                self._db.upsert_peer(share_id, peer_id, addrs, online=False)
-
-            await self._publish_control_event({
-                "type":    "peer_event",
-                "share_id": share_id,
-                "peer_id":  peer_id,
-                "online":   event.type == pb.PeerEvent.EVENT_TYPE_ONLINE,
-            })
-
-        return _handler
-
-    async def _handle_remote_update(self, share_id: str, remote_info_hash: str,
-                                    remote_peer_id: str, local_share) -> None:
-        """
-        A remote peer announced a different info_hash than we have locally.
-        Apply the share's conflict strategy before switching to their torrent.
-        """
-        strategy = local_share.conflict_strategy or ConflictStrategy.LAST_WRITE_WINS
-        log.info("Remote update detected share=%s peer=%s strategy=%s "
-                 "local_ih=%s remote_ih=%s",
-                 share_id, remote_peer_id[:8], strategy.value,
-                 local_share.info_hash, remote_info_hash)
-
-        if strategy == ConflictStrategy.LAST_WRITE_WINS:
-            await self._switch_to_remote_torrent(share_id, remote_info_hash)
-
-        elif strategy == ConflictStrategy.RENAME_CONFLICT:
-            self._rename_local_files_as_conflicts(share_id, local_share.local_path,
-                                                  remote_peer_id)
-            await self._switch_to_remote_torrent(share_id, remote_info_hash)
-
-        elif strategy == ConflictStrategy.ASK:
-            # Record the conflict and pause the share until the user resolves it.
-            conflict_id = self._db.add_conflict(
-                share_id         = share_id,
-                remote_peer_id   = remote_peer_id,
-                remote_info_hash = remote_info_hash,
-                local_info_hash  = local_share.info_hash,
-            )
-            self._db.set_share_state(share_id, ShareState.PAUSED)
-            if self._file_watcher:
-                self._file_watcher.remove_share(share_id)
-            log.info("Conflict recorded id=%d share=%s - paused awaiting resolution",
-                     conflict_id, share_id)
-            await self._publish_control_event({
-                "type":        "conflict",
-                "share_id":    share_id,
-                "conflict_id": conflict_id,
-                "message":     (
-                    f"Content conflict: peer {remote_peer_id[:8]} has different "
-                    f"version. Use 'peerdup share resolve {conflict_id} "
-                    f"<keep-local|keep-remote>' to resolve."
-                ),
-            })
-
-    def _rename_local_files_as_conflicts(self, share_id: str, local_path: str,
-                                         remote_peer_id: str) -> None:
-        """
-        Rename all locally-tracked files to conflict copies before accepting
-        the remote version. Creates: filename.conflict.TIMESTAMP.EXT
-        """
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d.%H%M%S")
-        peer_tag = remote_peer_id[:8]
-        local_root = Path(local_path)
-
-        for db_file in self._db.get_files(share_id):
-            full_path = local_root / db_file.rel_path
-            if not full_path.exists():
-                continue
-            stem   = full_path.stem
-            suffix = full_path.suffix
-            conflict_name = f"{stem}.conflict.{ts}.{peer_tag}{suffix}"
-            conflict_path = full_path.parent / conflict_name
-            try:
-                full_path.rename(conflict_path)
-                log.info("Conflict copy: %s -> %s", full_path.name, conflict_name)
-            except Exception:
-                log.exception("Failed to rename conflict file %s", full_path)
-
-    async def _switch_to_remote_torrent(self, share_id: str,
-                                        remote_info_hash: str) -> None:
-        """
-        Drop our current torrent handle and re-add with the remote peer's
-        info_hash so libtorrent fetches metadata + content from them.
-        """
-        if share_id in self._switching:
-            log.debug("Switch already in progress for share=%s - skipping duplicate",
-                      share_id[:8])
-            return
-        self._switching.add(share_id)
-        try:
-            await self._do_switch_to_remote_torrent(share_id, remote_info_hash)
-        finally:
-            self._switching.discard(share_id)
-
-    async def _do_switch_to_remote_torrent(self, share_id: str,
-                                           remote_info_hash: str) -> None:
-        share = self._db.get_share(share_id)
-        if not share:
-            return
-        torrent_path = os.path.join(
-            self._data_dir, "torrents", f"{share_id}.torrent"
-        )
-        # Remove the existing .torrent file so _activate_share does a fresh
-        # magnet-style bootstrap from the remote info_hash.
-        try:
-            if os.path.exists(torrent_path):
-                os.remove(torrent_path)
-        except Exception:
-            log.warning("Could not remove stale torrent file %s", torrent_path)
-
-        # Update DB before removing/re-adding the torrent so that if the LAN
-        # announce loop fires during the executor call it broadcasts the new
-        # info_hash rather than the stale old one (which would cause the seeder
-        # to see a mismatch and switch back, undoing the change).
-        self._db.set_share_state(share_id, ShareState.SYNCING,
-                                 info_hash=remote_info_hash)
-        # Pause the file watcher so that inotify events from pre-positioning
-        # (file moves that rearrange existing content into the new layout) do
-        # not fire _handle_fs_event once we transition back to SEEDING.
-        # The watcher is re-enabled in _status_update_loop on SEEDING transition.
-        if self._file_watcher:
-            self._file_watcher.remove_share(share_id)
-        self._lt.remove_share(share_id, delete_files=False)
-        try:
-            loop = asyncio.get_running_loop()
-            ih = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._lt.add_share,
-                    share_id, share.local_path,
-                    torrent_path=torrent_path,
-                    seed_mode=False,
-                    info_hash=remote_info_hash,
-                ),
-            )
-            self._db.set_share_state(share_id, ShareState.SYNCING, info_hash=ih)
-            log.info("Switched to remote torrent share=%s ih=%s", share_id, ih)
-        except Exception:
-            log.exception("Failed to switch to remote torrent share=%s", share_id)
-
-    # ── Internal activation ──────────────────────────────────────────────────
+    # -- Internal activation --------------------------------------------------
 
     async def _activate_share(self, share_id: str, local_path: str):
         """Set up watcher, libtorrent, announce, and start watch stream."""
@@ -919,12 +664,9 @@ class SyncCoordinator:
             ),
         )
 
-        torrent_path = os.path.join(
-            self._data_dir, "torrents", f"{share_id}.torrent"
-        )
-
-        local_share = self._db.get_share(share_id)
-        local_only  = local_share.local_only if local_share else False
+        torrent_path = self._torrent_mgr.torrent_path(share_id)
+        local_share  = self._db.get_share(share_id)
+        local_only   = local_share.local_only if local_share else False
 
         # If we have no files and no saved torrent, try to bootstrap from an
         # online peer's announced info_hash (magnet-style / BEP 9 ut_metadata).
@@ -942,31 +684,25 @@ class SyncCoordinator:
         if not has_files and peer_info_hash is None and not os.path.exists(torrent_path):
             # Empty directory with no known info_hash - we can't build a torrent
             # from nothing. Stay in SYNCING and wait for a LAN announcement to
-            # provide the remote info_hash; _on_lan_peer will call
+            # provide the remote info_hash; handle_lan_peer will call
             # _switch_to_remote_torrent to bootstrap the magnet download.
             self._db.set_share_state(share_id, ShareState.SYNCING)
             log.info("Share %s: no files and no peer info_hash - waiting for LAN peer",
                      share_id)
         else:
             try:
-                loop = asyncio.get_running_loop()
-                ih = await loop.run_in_executor(
-                    None,
-                    functools.partial(
-                        self._lt.add_share,
-                        share_id, local_path,
-                        torrent_path=torrent_path,
-                        seed_mode=has_files,
-                        info_hash=peer_info_hash,
-                    ),
+                ih = await self._torrent_mgr.activate(
+                    share_id,
+                    local_path,
+                    seed_mode    = has_files,
+                    info_hash    = peer_info_hash,
+                    torrent_path = torrent_path,
                 )
                 self._db.set_share_state(share_id,
                                          ShareState.SEEDING if has_files
                                          else ShareState.SYNCING,
                                          info_hash=ih)
                 if has_files and (local_share is None or (local_share.seq or 0) == 0):
-                    # First activation with local content - set initial seq so
-                    # other peers know we have content and can compare.
                     self._db.increment_share_seq(share_id)
             except Exception as e:
                 log.exception("Failed to add torrent for share %s", share_id)
@@ -987,30 +723,75 @@ class SyncCoordinator:
                 pass
 
         if not local_only:
-            # Announce immediately so peers discover our info_hash without
-            # waiting for the background loop's first iteration.
+            await self._announce_mgr.start_share(share_id)
+
+        if not local_only and share_id not in self._watch_tasks:
+            stop_ev = asyncio.Event()
+            self._watch_stop[share_id] = stop_ev
+            handler = self._peer_handler.make_registry_handler(share_id)
+            self._watch_tasks[share_id] = asyncio.create_task(
+                watch_share_peers_loop(
+                    self._registry, share_id, handler, stop_ev,
+                )
+            )
+
+    # -- Switch to remote torrent --------------------------------------------
+
+    async def _switch_to_remote_torrent(self, share_id: str,
+                                        remote_info_hash: str) -> None:
+        """
+        Drop our current torrent handle and re-add with the remote peer's
+        info_hash so libtorrent fetches metadata + content from them.
+
+        The _switching guard prevents concurrent calls racing on DB state and
+        libtorrent handles. DB update happens BEFORE watcher pause and lt handle
+        removal so the LAN announce loop broadcasts the new info_hash rather than
+        the stale old one during the executor call.
+        """
+        if share_id in self._switching:
+            log.debug("Switch already in progress for share=%s - skipping duplicate",
+                      share_id[:8])
+            return
+        self._switching.add(share_id)
+        try:
+            share = self._db.get_share(share_id)
+            if not share:
+                return
+            # Update DB before removing/re-adding the torrent. Ordering matters:
+            # if the LAN announce loop fires during the executor call it will
+            # broadcast the new info_hash rather than the stale old one.
+            self._db.set_share_state(share_id, ShareState.SYNCING,
+                                     info_hash=remote_info_hash)
+            # Pause file watcher so pre-positioning file moves don't trigger rebuild.
+            # Re-enabled in _status_update_loop on SEEDING transition.
+            if self._file_watcher:
+                self._file_watcher.remove_share(share_id)
+            await self._torrent_mgr.replace_with_remote(share_id, remote_info_hash)
+            log.info("Switched to remote torrent share=%s ih=%s", share_id, remote_info_hash)
+        except Exception:
+            log.exception("Failed to switch to remote torrent share=%s", share_id)
+        finally:
+            self._switching.discard(share_id)
+
+    # -- Rebuild complete callback -------------------------------------------
+
+    async def _on_rebuild_complete(self, share_id: str, info_hash: str,
+                                   local_only: bool) -> None:
+        """Called by TorrentManager after a successful rebuild.
+
+        Re-injects known peers into the new torrent handle and announces
+        to the registry so remote peers see the updated info_hash immediately.
+        """
+        for kp in self._db.get_online_peers(share_id):
             try:
-                await self._announce(share_id)
+                for addr in json.loads(kp.addresses):
+                    self._lt.add_peer(share_id, addr["host"], addr["port"])
             except Exception:
-                log.warning("Initial announce failed for share=%s (will retry in loop)",
-                            share_id)
+                pass
+        if not local_only:
+            await self._announce_mgr.announce_once(share_id)
 
-            if share_id not in self._announce_tasks:
-                self._announce_tasks[share_id] = asyncio.create_task(
-                    self._announce_loop(share_id)
-                )
-
-            if share_id not in self._watch_tasks:
-                stop_ev = asyncio.Event()
-                self._watch_stop[share_id] = stop_ev
-                handler = self._make_peer_event_handler(share_id)
-                self._watch_tasks[share_id] = asyncio.create_task(
-                    watch_share_peers_loop(
-                        self._registry, share_id, handler, stop_ev,
-                    )
-                )
-
-    # ── Registry connect loop ─────────────────────────────────────────────────
+    # -- Registry connect loop ------------------------------------------------
 
     async def _registry_connect_loop(self):
         """Register with registry (retrying with backoff), then resume shares."""
@@ -1039,7 +820,7 @@ class SyncCoordinator:
             if share.state != ShareState.PAUSED:
                 await self._activate_share(share.share_id, share.local_path)
 
-    # ── File event loop ───────────────────────────────────────────────────────
+    # -- File event loop ------------------------------------------------------
 
     async def _fs_event_loop(self):
         """Process file change events from the FileWatcher."""
@@ -1065,7 +846,7 @@ class SyncCoordinator:
             return
 
         # Don't rebuild the torrent while we're downloading from a peer.
-        # libtorrent is writing files — rebuilding from partial content would
+        # libtorrent is writing files - rebuilding from partial content would
         # produce a wrong info_hash and cause the seeder to chase our stub.
         if share.state == ShareState.SYNCING:
             log.debug("FS event ignored during SYNCING share=%s", evt.share_id)
@@ -1098,90 +879,12 @@ class SyncCoordinator:
             except FileNotFoundError:
                 return
 
-        # Rebuild torrent and re-announce, with a per-share debounce so that a
-        # burst of events (e.g. a folder rename with N files) produces at most 2
-        # rebuilds instead of N.
-        now  = time.monotonic()
-        last = self._last_rebuild.get(evt.share_id, 0.0)
-        if now - last < _REBUILD_DEBOUNCE_SECS:
-            # A rebuild just happened. Cancel any pending follow-up and reschedule
-            # so we coalesce the burst into a single deferred rebuild.
-            existing = self._pending_rebuild.pop(evt.share_id, None)
-            if existing and not existing.done():
-                existing.cancel()
-            delay = _REBUILD_DEBOUNCE_SECS - (now - last)
-            sid   = evt.share_id
-            local_path_str = share.local_path
-            local_only     = share.local_only
-
-            async def _deferred_rebuild():
-                await asyncio.sleep(delay)
-                self._pending_rebuild.pop(sid, None)
-                # Re-read share in case it was removed while we were waiting.
-                s = self._db.get_share(sid)
-                if s and s.state != ShareState.PAUSED and s.state != ShareState.SYNCING:
-                    await self._do_rebuild_torrent(sid, local_path_str, local_only)
-
-            task = asyncio.create_task(
-                _deferred_rebuild(), name=f"rebuild-{evt.share_id[:8]}"
-            )
-            self._pending_rebuild[evt.share_id] = task
-            log.debug("Rebuild debounced share=%s retry in %.1fs",
-                      evt.share_id[:8], delay)
-            return
-
-        self._last_rebuild[evt.share_id] = now
-        await self._do_rebuild_torrent(evt.share_id, share.local_path, share.local_only)
-
-    async def _do_rebuild_torrent(self, share_id: str, local_path: str,
-                                  local_only: bool) -> None:
-        """Rebuild the torrent, update DB, and re-announce. Called after FS changes."""
-        torrent_path = os.path.join(
-            self._data_dir, "torrents", f"{share_id}.torrent"
+        # Rebuild torrent and re-announce via TorrentManager (handles debounce).
+        self._torrent_mgr.schedule_or_rebuild(
+            evt.share_id, share.local_path, share.local_only
         )
-        try:
-            # Delete the cached .torrent file so add_share always rebuilds from
-            # the current directory state. If we let it load the stale file,
-            # libtorrent will expect files at their OLD paths and create empty
-            # placeholders for any that are now missing (moved or deleted),
-            # making them reappear.
-            try:
-                if os.path.exists(torrent_path):
-                    os.remove(torrent_path)
-            except Exception:
-                log.debug("Could not remove stale torrent file %s", torrent_path)
 
-            # Remove old handle and re-add with fresh metadata.
-            self._lt.remove_share(share_id, delete_files=False)
-            loop = asyncio.get_running_loop()
-            ih = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._lt.add_share,
-                    share_id, local_path,
-                    torrent_path=torrent_path,
-                    seed_mode=True,
-                ),
-            )
-            new_seq = self._db.increment_share_seq(share_id)
-            self._db.set_share_state(share_id, ShareState.SEEDING, info_hash=ih)
-            self._last_rebuild[share_id] = time.monotonic()
-            log.debug("Torrent rebuilt share=%s info_hash=%s seq=%d",
-                      share_id[:8], ih, new_seq)
-
-            # Re-inject known peers.
-            for kp in self._db.get_online_peers(share_id):
-                for addr in json.loads(kp.addresses):
-                    self._lt.add_peer(share_id, addr["host"], addr["port"])
-
-            # Announce immediately (registry shares only).
-            if not local_only:
-                await self._announce(share_id)
-
-        except Exception:
-            log.exception("Failed to update torrent after fs event share=%s", share_id)
-
-    # ── Status update loop ────────────────────────────────────────────────────
+    # -- Status update loop --------------------------------------------------
 
     async def _status_update_loop(self):
         while not self._stop_event.is_set():
@@ -1189,7 +892,7 @@ class SyncCoordinator:
                 status: TorrentStatus = await asyncio.wait_for(
                     self._status_queue.get(), timeout=1.0
                 )
-                # Transition SYNCING → SEEDING when libtorrent finishes.
+                # Transition SYNCING -> SEEDING when libtorrent finishes.
                 # This re-enables the file watcher for future local changes.
                 if status.state in ("finished", "seeding"):
                     share = self._db.get_share(status.share_id)
@@ -1221,7 +924,7 @@ class SyncCoordinator:
             except asyncio.CancelledError:
                 break
 
-    # ── Control event bus ─────────────────────────────────────────────────────
+    # -- Control event bus ----------------------------------------------------
 
     def subscribe_control(self, queue: asyncio.Queue):
         self._control_subscribers.append(queue)
@@ -1239,142 +942,7 @@ class SyncCoordinator:
             except asyncio.QueueFull:
                 pass
 
-    # ── Torrent pre-positioning ───────────────────────────────────────────────
-
-    async def _on_metadata_received(self, share_id: str):
-        """
-        Called when libtorrent receives torrent metadata via ut_metadata (BEP 9).
-
-        Before libtorrent starts downloading, scan the local share directory for
-        files that match the torrent's expected content by name and size. Move any
-        matches into their expected positions so libtorrent's piece-check finds
-        them already in place and skips the download for those pieces.
-
-        This makes folder renames and file moves free — no re-transfer needed.
-        """
-        local_share = self._db.get_share(share_id)
-        if not local_share:
-            return
-
-        local_path = Path(local_share.local_path)
-        save_path  = local_path.parent   # matches libtorrent's save_path
-
-        torrent_files = self._lt.get_torrent_file_list(share_id)
-        if not torrent_files:
-            return
-
-        # Collect the set of DB-tracked paths before entering the executor so
-        # we don't call _db from a thread.
-        tracked_paths = {local_path / db_file.rel_path
-                         for db_file in self._db.get_files(share_id)}
-
-        # All filesystem work (rglob, stat, rename, unlink, rmdir) runs in a
-        # thread pool executor so it cannot block the event loop on large shares
-        # or slow storage (NFS, spinning disk, etc.).
-        loop = asyncio.get_running_loop()
-        moved_any = await loop.run_in_executor(
-            None,
-            functools.partial(
-                self._preposition_files,
-                share_id, local_path, save_path, torrent_files, tracked_paths,
-            ),
-        )
-
-        if moved_any:
-            self._lt.force_recheck(share_id)
-            log.info("Pre-positioning complete share=%s forcing recheck", share_id[:8])
-
-    @staticmethod
-    def _preposition_files(
-        share_id:      str,
-        local_path:    Path,
-        save_path:     Path,
-        torrent_files: list[tuple[str, int]],
-        tracked_paths: set[Path],
-    ) -> bool:
-        """
-        Synchronous pre-positioning work, safe to run in a thread pool executor.
-
-        Returns True if any file was moved or deleted (so the caller knows to
-        call force_recheck on the libtorrent handle).
-        """
-        # Index all existing local files by (basename, size).
-        local_index: dict[tuple[str, int], Path] = {}
-        if local_path.exists():
-            for f in local_path.rglob("*"):
-                if f.is_file():
-                    try:
-                        local_index[(f.name, f.stat().st_size)] = f
-                    except OSError:
-                        pass
-
-        moved_any = False
-        vacated_dirs: set[Path] = set()
-        for rel_path, size in torrent_files:
-            expected = save_path / rel_path
-            if expected.exists():
-                continue   # already in place
-
-            src = local_index.get((expected.name, size))
-            if src and src.exists():
-                try:
-                    expected.parent.mkdir(parents=True, exist_ok=True)
-                    vacated_dirs.add(src.parent)
-                    src.rename(expected)
-                    log.info("Pre-positioned share=%s %s -> %s",
-                             share_id[:8], src.relative_to(save_path), rel_path)
-                    moved_any = True
-                except Exception as exc:
-                    log.debug("Could not pre-position %s: %s", src, exc)
-
-        # Remove directories that were emptied by pre-positioning (e.g. a
-        # renamed folder whose files were all moved to the new path).
-        # Walk up from each vacated dir to the share root so that parent
-        # directories emptied by child-dir removal are also cleaned up.
-        dirs_to_try: set[Path] = set()
-        for d in vacated_dirs:
-            p = d
-            while p != local_path and p.is_relative_to(local_path):
-                dirs_to_try.add(p)
-                p = p.parent
-        for d in sorted(dirs_to_try, key=lambda p: len(p.parts), reverse=True):
-            try:
-                d.rmdir()   # only removes if empty
-                log.info("Removed vacated dir share=%s %s",
-                         share_id[:8], d.relative_to(local_path))
-            except OSError:
-                pass  # not empty or already gone - fine
-
-        # Remove tracked files that are no longer in the new torrent layout.
-        # Only delete files peerdup itself placed here (in the DB) — never touch
-        # user files that exist in the share directory but are not tracked.
-        new_layout = {save_path / rel_path for rel_path, _ in torrent_files}
-        for f in tracked_paths:
-            if f not in new_layout and f.exists():
-                try:
-                    f.unlink()
-                    log.info("Removed stale tracked file share=%s %s",
-                             share_id[:8], f.relative_to(local_path))
-                    moved_any = True
-                except Exception as exc:
-                    log.debug("Could not remove stale file %s: %s", f, exc)
-
-        # Remove all empty directories under share root (catches any stale dirs
-        # left after stale-file removal or incomplete prior pre-positioning passes).
-        if local_path.exists():
-            for d in sorted(
-                [p for p in local_path.rglob("*") if p.is_dir()],
-                key=lambda p: len(p.parts),
-                reverse=True,
-            ):
-                try:
-                    d.rmdir()
-                except OSError:
-                    pass
-
-        return moved_any
-
-    # ── LAN discovery ─────────────────────────────────────────────────────────
+    # -- LAN discovery --------------------------------------------------------
 
     def _get_active_share_ids(self) -> list[tuple[str, str, int]]:
         """Return (share_id, info_hash, seq) triples for all non-paused local shares."""
@@ -1384,89 +952,7 @@ class SyncCoordinator:
             if s.state != ShareState.PAUSED
         ]
 
-    async def _on_lan_peer(self, peer_id: str, shares: list[tuple[str, str, int]],
-                           host: str, port: int, name: str = ""):
-        """
-        Called by LanDiscovery for each verified remote announcement.
-
-        ACL check: for registry shares, only inject peers confirmed in the
-        known_peers cache.  For local-only shares the registry never populates
-        that cache, so any peer whose signed packet carries the correct
-        share_id is admitted directly.
-
-        Sequence numbers resolve conflicts: higher seq = more recent local
-        changes. If remote_seq > local_seq, accept their version. If
-        remote_seq < local_seq, we have newer changes — seed to them instead.
-        Equal seq with different hash = true conflict, apply conflict strategy.
-        """
-        try:
-            for share_id, remote_ih, remote_seq in shares:
-                local_share = self._db.get_share(share_id)
-                if not local_share:
-                    continue
-                if not local_share.local_only:
-                    known = {kp.peer_id
-                             for kp in self._db.list_all_known_peers(share_id)}
-                    if peer_id not in known:
-                        log.debug("LAN peer %s not in ACL cache for share %s - skip",
-                                  peer_id[:8], share_id[:8])
-                        continue
-
-                # Persist peer presence before deciding what to do with torrent.
-                self._db.upsert_peer(
-                    share_id,
-                    peer_id,
-                    [{"host": host, "port": port, "is_lan": True}],
-                    online=True,
-                    name=name,
-                )
-
-                local_ih  = local_share.info_hash or ""
-                local_seq = local_share.seq or 0
-
-                if remote_ih and not local_ih:
-                    # No local torrent yet - bootstrap from remote info_hash.
-                    log.info("LAN bootstrap share=%s peer=%s - fetching from peer",
-                             share_id[:8], peer_id[:8])
-                    self._db.set_share_seq(share_id, remote_seq)
-                    await self._switch_to_remote_torrent(share_id, remote_ih)
-                    self._lt.add_peer(share_id, host, port)
-                elif remote_ih and local_ih and remote_ih != local_ih:
-                    if remote_seq > local_seq:
-                        # Remote has newer changes - accept their version.
-                        log.info("LAN mismatch share=%s peer=%s remote_seq=%d>local=%d - accepting",
-                                 share_id[:8], peer_id[:8], remote_seq, local_seq)
-                        self._db.set_share_seq(share_id, remote_seq)
-                        await self._handle_remote_update(
-                            share_id, remote_ih, peer_id, local_share,
-                        )
-                        # Inject peer into the new magnet handle so libtorrent
-                        # can fetch metadata and content from them immediately.
-                        self._lt.add_peer(share_id, host, port)
-                    elif remote_seq == local_seq:
-                        # True conflict: both changed since last sync.
-                        log.info("LAN conflict share=%s peer=%s seq=%d - applying strategy",
-                                 share_id[:8], peer_id[:8], remote_seq)
-                        await self._handle_remote_update(
-                            share_id, remote_ih, peer_id, local_share,
-                        )
-                        self._lt.add_peer(share_id, host, port)
-                    else:
-                        # We have newer changes - seed to them.
-                        log.info("LAN mismatch share=%s peer=%s remote_seq=%d<local=%d - seeding to them",
-                                 share_id[:8], peer_id[:8], remote_seq, local_seq)
-                        self._lt.add_peer(share_id, host, port)
-                else:
-                    # Same torrent or one side has no content yet - inject peer.
-                    log.info("LAN peer injected share=%s peer=%s addr=%s:%d",
-                             share_id[:8], peer_id[:8], host, port)
-                    self._lt.add_peer(share_id, host, port)
-
-        except Exception:
-            log.exception("_on_lan_peer failed peer=%s shares=%s",
-                          peer_id[:8], [s[0][:8] for s in shares])
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # -- Helpers --------------------------------------------------------------
 
     def _build_share_status(self, share_id: str, name: str, local_path: str,
                             state: str, lt_status: TorrentStatus | None,

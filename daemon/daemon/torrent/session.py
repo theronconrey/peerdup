@@ -112,6 +112,26 @@ class LibtorrentSession:
             self._session.pause()
         log.info("libtorrent session stopped")
 
+    def register_alert_handlers(
+        self,
+        on_status: Callable[[TorrentStatus], None] | None = None,
+        on_metadata: Callable[[str], None] | None = None,
+    ) -> None:
+        """Register callbacks invoked from the alert polling thread.
+
+        on_status:   called with a TorrentStatus when torrent state changes
+                     (torrent_finished_alert, state_changed_alert, etc.).
+        on_metadata: called with share_id when ut_metadata finishes fetching
+                     torrent metadata from a remote peer.
+
+        Both callbacks are invoked from the background alert thread - callers
+        MUST bridge back to their asyncio event loop via
+        ``loop.call_soon_threadsafe``.  Safe to call before ``start()``.
+        Replaces any previously registered handlers.
+        """
+        self._on_status   = on_status
+        self._on_metadata = on_metadata
+
     # ── Torrent management ────────────────────────────────────────────────────
 
     def add_share(self, share_id: str, local_path: str,
