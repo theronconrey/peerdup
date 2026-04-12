@@ -1117,6 +1117,24 @@ class SyncCoordinator:
                         )
                         log.info("Share download complete share=%s ih=%s",
                                  status.share_id[:8], status.info_hash[:8])
+                        # Drain queued fs events for this share. They were
+                        # generated during SYNCING (e.g. from pre-positioning
+                        # file moves) and must not trigger a torrent rebuild
+                        # now that we're SEEDING — that would increment seq
+                        # and start a ping-pong with the peer we just synced from.
+                        kept = []
+                        while not self._fs_queue.empty():
+                            try:
+                                queued = self._fs_queue.get_nowait()
+                                if queued.share_id != status.share_id:
+                                    kept.append(queued)
+                            except asyncio.QueueEmpty:
+                                break
+                        for q in kept:
+                            await self._fs_queue.put(q)
+                        if len(kept) < self._fs_queue.qsize() + len(kept):
+                            log.debug("Drained stale fs events after download share=%s",
+                                      status.share_id[:8])
 
                 await self._publish_control_event({
                     "type":    "sync_progress",
