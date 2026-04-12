@@ -1217,14 +1217,21 @@ class SyncCoordinator:
 
         # Remove directories that were emptied by pre-positioning (e.g. a
         # renamed folder whose files were all moved to the new path).
-        for d in sorted(vacated_dirs, key=lambda p: len(p.parts), reverse=True):
-            if d.is_relative_to(local_path) and d != local_path:
-                try:
-                    d.rmdir()   # only removes if empty
-                    log.info("Removed vacated dir share=%s %s",
-                             share_id[:8], d.relative_to(local_path))
-                except OSError:
-                    pass  # not empty or already gone - fine
+        # Walk up from each vacated dir to the share root so that parent
+        # directories emptied by child-dir removal are also cleaned up.
+        dirs_to_try: set[Path] = set()
+        for d in vacated_dirs:
+            p = d
+            while p != local_path and p.is_relative_to(local_path):
+                dirs_to_try.add(p)
+                p = p.parent
+        for d in sorted(dirs_to_try, key=lambda p: len(p.parts), reverse=True):
+            try:
+                d.rmdir()   # only removes if empty
+                log.info("Removed vacated dir share=%s %s",
+                         share_id[:8], d.relative_to(local_path))
+            except OSError:
+                pass  # not empty or already gone - fine
 
         if moved_any:
             self._lt.force_recheck(share_id)
