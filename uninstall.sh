@@ -45,7 +45,7 @@ if [ -d "$EXT_DIR" ]; then
     info "Removing GNOME extension..."
     gnome-extensions disable "peerdup@peerdup" 2>/dev/null || true
     rm -rf "$EXT_DIR"
-    ok "GNOME extension removed"
+    ok "GNOME extension removed (log out and back in to clear the icon from the top bar)"
 fi
 
 # ── uninstall Python packages ─────────────────────────────────────────────────
