@@ -67,6 +67,12 @@ def setup_logging(level: str):
 # ── Control socket server ─────────────────────────────────────────────────────
 
 def build_control_server(socket_path: str, coordinator: SyncCoordinator) -> grpc.Server:
+    # grpc_tools generates bare 'import control_pb2' in the grpc stub.
+    # Adding the package directory to sys.path lets that resolve without
+    # requiring sed post-processing after protoc.
+    _pkg = os.path.dirname(os.path.abspath(__file__))
+    if _pkg not in sys.path:
+        sys.path.insert(0, _pkg)
     from daemon import control_pb2_grpc  # type: ignore
 
     server = grpc.server(

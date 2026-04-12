@@ -17,8 +17,7 @@ proto:
 		--python_out=$(PROTO_OUT) \
 		--grpc_python_out=$(PROTO_OUT) \
 		$(PROTO_DIR)/control.proto
-	@sed -i 's/^import control_pb2 as control__pb2$$/from daemon import control_pb2 as control__pb2/' $(PROTO_OUT)/control_pb2_grpc.py
-	@echo "Stubs written: control_pb2*.py (import path fixed)"
+	@echo "Stubs written: control_pb2*.py"
 	@echo "Registry stubs: re-exported from registry package (no regeneration needed)"
 
 ## Run tests
