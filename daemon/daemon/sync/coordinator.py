@@ -903,10 +903,13 @@ class SyncCoordinator:
         if not share or share.state == ShareState.PAUSED:
             return
 
-        # Don't rebuild the torrent while we're downloading from a peer.
+        # Don't rebuild the torrent while we're actively downloading from a peer.
         # libtorrent is writing files - rebuilding from partial content would
         # produce a wrong info_hash and cause the seeder to chase our stub.
-        if share.state == ShareState.SYNCING:
+        # Only suppress when we have an info_hash (mid-download); if info_hash
+        # is absent we are still waiting for the initial torrent build and FS
+        # events should proceed so newly-added files seed correctly.
+        if share.state == ShareState.SYNCING and share.info_hash:
             log.debug("FS event ignored during SYNCING share=%s", evt.share_id)
             return
 
