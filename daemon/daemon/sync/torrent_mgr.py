@@ -388,7 +388,12 @@ class TorrentManager:
         for rel_path, size in torrent_files:
             expected = save_path / rel_path
             if expected.exists():
-                continue
+                try:
+                    if expected.stat().st_size == size:
+                        continue  # Already in place with correct size.
+                except OSError:
+                    pass
+                # Exists but wrong size (libtorrent pre-allocated) - proceed.
 
             src = local_index.get((expected.name, size))
             if src and src.exists():

@@ -961,6 +961,16 @@ class SyncCoordinator:
                         )
                         log.info("Share download complete share=%s ih=%s",
                                  status.share_id[:8], status.info_hash[:8])
+                        # Populate local_files DB from the downloaded content so
+                        # future pre-positioning has accurate tracked_paths.
+                        # (The watcher was paused during sync so no events fired.)
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None,
+                            self._index_local_files,
+                            status.share_id,
+                            share.local_path,
+                        )
                         # Re-enable the file watcher now that we're SEEDING.
                         # It was paused in _switch_to_remote_torrent to prevent
                         # pre-positioning file moves from triggering a rebuild.
@@ -981,6 +991,29 @@ class SyncCoordinator:
                 continue
             except asyncio.CancelledError:
                 break
+
+    # -- Local file indexing --------------------------------------------------
+
+    def _index_local_files(self, share_id: str, local_path: str) -> None:
+        """Scan local_path and upsert all files into local_files DB.
+
+        Called after a download completes so that tracked_paths is accurate
+        for future pre-positioning on this peer. Runs in executor (blocking I/O).
+        """
+        root = Path(local_path)
+        if not root.exists():
+            return
+        for f in root.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                st = f.stat()
+                rel = str(f.relative_to(root))
+                self._db.upsert_file(share_id, rel,
+                                     size=st.st_size, mtime_ns=st.st_mtime_ns)
+            except Exception:
+                pass
+        log.debug("Indexed local files share=%s path=%s", share_id[:8], local_path)
 
     # -- Control event bus ----------------------------------------------------
 
